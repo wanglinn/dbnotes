@@ -1,0 +1,65 @@
+diff --git a/src/backend/utils/misc/guc.c b/src/backend/utils/misc/guc.c
+index a95cd45..3b6a39c 100644
+--- a/src/backend/utils/misc/guc.c
++++ b/src/backend/utils/misc/guc.c
+@@ -184,6 +184,10 @@ static int	syslog_facility = LOG_LOCAL0;
+ static int	syslog_facility = 0;
+ #endif
+ 
++#ifdef PGXC
++bool enable_debug_mvcc;
++#endif
++
+ static void assign_syslog_facility(int newval, void *extra);
+ static void assign_syslog_ident(const char *newval, void *extra);
+ static void assign_session_replication_role(int newval, void *extra);
+@@ -1585,6 +1589,18 @@ static struct config_bool ConfigureNamesBool[] =
+ 		NULL, NULL, NULL
+ 	},
+ 
++#ifdef PGXC
++	{
++		{"enable_debug_mvcc", PGC_USERSET, QUERY_TUNING_METHOD,
++			gettext_noop("funciton HeapTupleSatisfiesMVCC always return true"),
++			NULL
++		},
++		&enable_debug_mvcc,
++		false,
++		NULL,NULL,NULL
++	},
++#endif
++
+ 	/* End-of-list marker */
+ 	{
+ 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
+diff --git a/src/backend/utils/time/tqual.c b/src/backend/utils/time/tqual.c
+index 55563ea..db206fc 100644
+--- a/src/backend/utils/time/tqual.c
++++ b/src/backend/utils/time/tqual.c
+@@ -1043,6 +1043,11 @@ bool
+ HeapTupleSatisfiesMVCC(HeapTupleHeader tuple, Snapshot snapshot,
+ 					   Buffer buffer)
+ {
++#ifdef PGXC
++	if (enable_debug_mvcc)
++		return true;
++#endif
++
+ 	if (!(tuple->t_infomask & HEAP_XMIN_COMMITTED))
+ 	{
+ 		if (tuple->t_infomask & HEAP_XMIN_INVALID)
+diff --git a/src/include/utils/tqual.h b/src/include/utils/tqual.h
+index 465231c..fb934cd 100644
+--- a/src/include/utils/tqual.h
++++ b/src/include/utils/tqual.h
+@@ -29,6 +29,10 @@ extern PGDLLIMPORT SnapshotData SnapshotToastData;
+ #define SnapshotAny			(&SnapshotAnyData)
+ #define SnapshotToast		(&SnapshotToastData)
+ 
++#ifdef PGXC
++extern bool enable_debug_mvcc;
++#endif
++
+ /*
+  * We don't provide a static SnapshotDirty variable because it would be
+  * non-reentrant.  Instead, users of that snapshot type should declare a
