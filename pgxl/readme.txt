@@ -7,3 +7,6 @@ enable_debug_mvcc.patch
 
 autoinstall_xl.sh
 安装pgxl集群工具，同安装pgxc的区别是需要在datanode节点上create 所有coordinator和datanode节点
+
+distribute_by_replication_default.patch
+添加guc参数distribute_by_replication_default用来设置默认表数据分布方式
