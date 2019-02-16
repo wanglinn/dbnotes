@@ -1,0 +1,112 @@
+理解如下SQL内部执行过程对应的path,plan,execute执行 过程。
+create table t1（id11 int, id12 int);
+insert into t1 values(1,11), (2,12),(3,13);
+
+select * from t1 ;
+select id11 from t1;
+select id11 from t1 where id11 = 1;
+select * from t1 where id11 = 1;
+select id11 from t1 where id11 > 1;
+select id11 from t1 where id11 = 1 or id12 = 12;
+
+针对单pg， 上述的SQL都可以这样理解：首先是表t1 seqscan， 然后根据约束判断seqsan获取的tupleslot(这个是包含所有列的tupleslot)是否满足条件
+，若满足则将tupleslot 取出需要的列然后重新组成slot返回（输入inslot，返回outslot）。
+
+通过set client_min_messages  = debug; set debug_print_parse  = on; 来查看sql对应的parse 可以理解为实际是path
+通过set client_min_messages  = debug; set debug_print_plan  = on; 来查看sql对饮的plan
+
+以下如果没特别说明针对的都是单pg。
+
+针对SQL 语句select * from t1 ; 其parse 思考下都由哪些内容：
+是个Query 结构体；
+rtable 链表即t1 表内容 即结构体RangeTblEntry；
+jointree 这个主要用来表示表之间join关系的或者约束的，这个对应的 FROMEXPR ，对应的约束quals 是NULL；
+targetList 这个是用来表示返回值对应的列的，即id11,id12, 对应结构体TargetEntry ，本SQL语句则是id11对应的TargetEntry 
+  和 id12对应的TargetEntry组成的链表；
+  
+对应的plan，组成内容：
+对应的PlannedStmt 结构体；
+planTree 对应的是seqscan 执行计划对应结构体Plan， 其主要内容包含：targetlist 即id11,id12对应结构体TargetEntry，约束qual 为NULL，
+      lefttree为NULL，righttree为NULL，扫描的表scanrelid 1；
+rtable对应的是表t1, 即结构体RangeTblEntry；
+
+
+针对SQL 语句select id11 from t1 ：
+对应parse 即path， 则 targetlist 只包含id11列的TargetEntry 结构体内容；
+对应plan,则 eqscan 执行计划对应结构体Plan 的targetlist 只有id11列TargetEntry结构体内容。
+则在execute 过程中，在ExecScan 函数从表中取出tupleslot （包含id11,id12两列）后在函数ExecProject函数进行处理，找出适当的列对应的值，
+具体见函数ExecJustAssignScanVar。函数ExecProject 是用来从源tupleslot选择需要的列组成tupleslot。
+(gdb) f 0
+#0  ExecJustAssignScanVar (state=0x310cf18, econtext=0x310c140, isnull=0x7ffc52b3cf5f "") at execExprInterp.c:1785
+(gdb) f 1
+#1  0x000000000074b5ab in ExecEvalExprSwitchContext (state=0x310cf18, econtext=0x310c140, isNull=0x7ffc52b3cf5f "")
+    at ../../../src/include/executor/executor.h:308
+(gdb)  f 2
+#2  0x000000000074b091 in ExecProject (projInfo=0x310cf10) at ../../../src/include/executor/executor.h:342
+(gdb) f 3
+#3  0x000000000074aced in ExecScan (node=0x310c028, accessMtd=0x77ae80 <SeqNext>, recheckMtd=0x77af60 <SeqRecheck>) at execScan.c:203
+
+
+
+针对SQL 语句select id11 from t1 where id11 = 1：
+对应parse 即path，则 jointree 中quals 约束是由内容的，是一个表达式Expr：opno 96 （oprname 为 = ） ， opfuncid 65 (proname 为int4eq) 
+ ， 输入内容 Var 变量id11 内容是常量Const 1;
+对应plan, 则在plantree中 seqscan 结构体Plan中的约束 qual 就是表达式id11=1 即上面parse 中所说的约束内容。
+对应执行器，在函数ExecScan中，获取表的tupleslot后会调用ExecQual 函数判断是否满足约束，若不满足则抛弃该tupleslot，重新获取下一个tupleslot。
+函数 ExecInterpExpr 用来判断获取的源tupleslot 内容是否满足约束条件。
+
+
+以下是对应的pg_operator 及 pg_proc 内容：
+postgres=# select * from pg_operator  where oid=96;
+-[ RECORD 1 ]+----------
+oprname      | =
+oprnamespace | 11
+oprowner     | 10
+oprkind      | b
+oprcanmerge  | t
+oprcanhash   | t
+oprleft      | 23
+oprright     | 23
+oprresult    | 16
+oprcom       | 96
+oprnegate    | 518
+oprcode      | int4eq
+oprrest      | eqsel
+oprjoin      | eqjoinsel
+
+postgres=# select * from pg_proc where oid  = 65;
+-[ RECORD 1 ]---+-------
+proname         | int4eq
+pronamespace    | 11
+proowner        | 10
+prolang         | 12
+procost         | 1
+prorows         | 0
+provariadic     | 0
+protransform    | -
+proisagg        | f
+proiswindow     | f
+prosecdef       | f
+proleakproof    | t
+proisstrict     | t
+proretset       | f
+provolatile     | i
+proparallel     | s
+pronargs        | 2
+pronargdefaults | 0
+prorettype      | 16
+proargtypes     | 23 23
+proallargtypes  | 
+proargmodes     | 
+proargnames     | 
+proargdefaults  | 
+protrftypes     | 
+prosrc          | int4eq
+probin          | 
+proconfig       | 
+proacl          | 
+
+
+
+
+
