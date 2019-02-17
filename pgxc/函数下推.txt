@@ -236,3 +236,24 @@ db1=#  select id from t3 where id > count_tt1_v();
  id 
 ----
 (0 rows)
+
+
+能否下推用到的一些函数：
+
+static ExecNodes *  pgxc_FQS_get_relation_nodes(RangeTblEntry *rte, Index varno, Query *query)
+给定 query 及 varno 及 rte 获取该Query 对应的执行节点信息
+
+ExecNodes * GetRelationNodesByQuals(Oid reloid, Index varno, Node *quals,RelationAccessType relaccess)
+给定表oid, 要查找的列varno， 约束quals ， 表的access 权限方式 来获取执行节点信息
+还有个函数 ExecNodes *
+GetRelationNodes(RelationLocInfo *rel_loc_info, Datum valueForDistCol,
+				bool isValueNull, Oid typeOfValueForDistCol,
+				RelationAccessType accessType)
+
+static Expr * pgxc_find_distcol_expr(Index varno,AttrNumber attrNum,Node *quals)
+给定分布列 及 约束， 来获取表达式 （该函数注释解释的比较清楚）
+
+Var *
+pgxc_get_dist_var(Index varno, RangeTblEntry *rte, List *tlist)
+:: 给定varno (表的排号) 及 表rte, 及 targetlist 获取分布列var
+
