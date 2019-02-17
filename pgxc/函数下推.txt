@@ -257,3 +257,17 @@ Var *
 pgxc_get_dist_var(Index varno, RangeTblEntry *rte, List *tlist)
 :: 给定varno (表的排号) 及 表rte, 及 targetlist 获取分布列var
 
+bool
+pgxc_is_expr_shippable(Expr *node, bool *has_aggs)
+查看给定的expr 是否可以直接下推（pgxc 函数注释比较清楚）
+
+bool
+pgxc_is_func_shippable(Oid funcid)
+查看给定的func 是否可以直接下推
+
+ExecNodes *
+pgxc_is_query_shippable(Query *query, int query_level)
+给定的query 是否可以直接下推
+
+
+
