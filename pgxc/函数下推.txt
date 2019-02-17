@@ -1,0 +1,238 @@
+概述：函数性质volatile 为 IMMUTABLE 是可以直接下推到datanode上执行的；若为其它即STABLE 和 VOLATILE (默认值)
+则无法下推到datanode上执行，需要先在coordinator上计算好结果然后使用该函数的结果进行下一步处理。
+
+若函数不能下推计算的下推计算了，则可能引起结果错误。
+
+create  table t3(id int);
+insert into t3 select generate_series(1,5);
+select xc_node_id , * from t3;
+
+针对函数性质为 IMMUTABLE
+
+CREATE OR REPLACE FUNCTION ADDN1(INT,INT) RETURNS INTEGER 
+AS 'SELECT $1+$2;'
+LANGUAGE SQL
+IMMUTABLE
+RETURNS NULL ON NULL INPUT;
+
+
+db1=# explain verbose select id from t3 where id > addn1(1,2);
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Data Node Scan on "__REMOTE_FQS_QUERY__"  (cost=0.00..0.00 rows=0 width=0)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM public.t3 WHERE (id > public.addn1(1, 2))
+(4 rows)
+
+
+db1=# set enable_fast_query_shipping  = off;
+SET
+db1=# explain verbose select id from t3 where id > addn1(1,2);
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Data Node Scan on t3 "_REMOTE_TABLE_QUERY_"  (cost=0.00..0.00 rows=1000 width=4)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM ONLY public.t3 WHERE (id > 3)
+(4 rows)
+
+针对函数性质为 VOLATILE (默认值)
+
+CREATE OR REPLACE FUNCTION ADDN2(INT,INT) RETURNS INTEGER 
+AS 'SELECT $1+$2;'
+LANGUAGE SQL
+RETURNS NULL ON NULL INPUT;
+
+db1=# show enable_fast_query_shipping ;
+ enable_fast_query_shipping 
+----------------------------
+ on
+(1 row)
+db1=# explain verbose select id from t3 where id > addn2(1,2);
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Data Node Scan on t3 "_REMOTE_TABLE_QUERY_"  (cost=0.00..0.00 rows=1000 width=4)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM ONLY public.t3 WHERE (id > 3)
+(4 rows)
+
+那么函数addn1 与 addn2 区别在哪儿呢？函数性质通过pg_proc 可以查看。
+
+db1=# select * from pg_proc  where proname = 'addn1';
+-[ RECORD 1 ]---+--------------
+proname         | addn1
+pronamespace    | 2200
+proowner        | 10
+prolang         | 14
+procost         | 100
+prorows         | 0
+provariadic     | 0
+protransform    | -
+proisagg        | f
+proiswindow     | f
+prosecdef       | f
+proleakproof    | f
+proisstrict     | t
+proretset       | f
+provolatile     | i   ---这个表示随着函数执行结果是不会变化的
+pronargs        | 2
+pronargdefaults | 0
+prorettype      | 23
+proargtypes     | 23 23
+proallargtypes  | 
+proargmodes     | 
+proargnames     | 
+proargdefaults  | 
+prosrc          | SELECT $1+$2;
+probin          | 
+proconfig       | 
+proacl          | 
+
+db1=# select * from pg_proc  where proname = 'addn2';
+-[ RECORD 1 ]---+--------------
+proname         | addn2
+pronamespace    | 2200
+proowner        | 10
+prolang         | 14
+procost         | 100
+prorows         | 0
+provariadic     | 0
+protransform    | -
+proisagg        | f
+proiswindow     | f
+prosecdef       | f
+proleakproof    | f
+proisstrict     | t
+proretset       | f
+provolatile     | v   ---这个表示随着函数执行结果随时可以变化的，这个是默认值
+pronargs        | 2
+pronargdefaults | 0
+prorettype      | 23
+proargtypes     | 23 23
+proallargtypes  | 
+proargmodes     | 
+proargnames     | 
+proargdefaults  | 
+prosrc          | SELECT $1+$2;
+probin          | 
+proconfig       | 
+proacl          | 
+
+
+有关函数性质的变量volatile 见文件pg_proc.h文件
+
+/*
+ * Symbolic values for provolatile column: these indicate whether the result
+ * of a function is dependent *only* on the values of its explicit arguments,
+ * or can change due to outside factors (such as parameter variables or
+ * table contents).  NOTE: functions having side-effects, such as setval(),
+ * must be labeled volatile to ensure they will not get optimized away,
+ * even if the actual return value is not changeable.
+ */
+#define PROVOLATILE_IMMUTABLE	'i'		/* never changes for given input */
+#define PROVOLATILE_STABLE		's'		/* does not change within a scan */
+#define PROVOLATILE_VOLATILE	'v'		/* can change even within a scan */
+
+针对函数性质为STABLE
+
+CREATE OR REPLACE FUNCTION ADDN3(INT,INT) RETURNS INTEGER 
+AS 'SELECT $1+$2;'
+LANGUAGE SQL
+STABLE
+RETURNS NULL ON NULL INPUT;
+
+db1=# explain verbose select id from t3 where id > addn3(1,2);
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Data Node Scan on t3 "_REMOTE_TABLE_QUERY_"  (cost=0.00..0.00 rows=1000 width=4)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM ONLY public.t3 WHERE (id > 3)
+(4 rows)
+
+
+不能下推的函数下推会引起结果错误
+
+
+create table tt1(id ind);
+insert into tt1 values(1),(1),(1),(1),(1);
+
+create function count_tt1_v() returns int8 as
+'select count(*) from tt1' language sql volatile;
+
+create function count_tt1_i() returns int8 as
+'select count(*) from tt1' language sql IMMUTABLE;
+
+
+db1=# select * from t3;
+ id 
+----
+  1
+  2
+  5
+  3
+  4
+(5 rows)
+
+db1=# select * from tt1;
+ id 
+----
+  1
+  1
+  1
+  1
+  1
+(5 rows)
+
+本不该下推的函数设置为immutable 则引起执行结果错误
+
+db1=# explain verbose select id from t3 where id > count_tt1_i();
+                                 QUERY PLAN                                 
+----------------------------------------------------------------------------
+ Data Node Scan on "__REMOTE_FQS_QUERY__"  (cost=0.00..0.00 rows=0 width=0)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM public.t3 WHERE (id > public.count_tt1_i())
+(4 rows)
+
+db1=# select id from t3 where id > count_tt1_i();  -- 结果错误
+ id 
+----
+  3
+  4
+(2 rows)
+
+db1=# set enable_fast_query_shipping  = off;
+SET
+db1=# explain verbose select id from t3 where id > count_tt1_i();
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Data Node Scan on t3 "_REMOTE_TABLE_QUERY_"  (cost=0.00..0.00 rows=1000 width=4)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM ONLY public.t3 WHERE (id > 5::bigint)
+(4 rows)
+
+db1=# select id from t3 where id > count_tt1_i();
+ id 
+----
+(0 rows)
+
+db1=# set enable_fast_query_shipping  = on;
+SET
+db1=# explain verbose select id from t3 where id > count_tt1_v();
+                                    QUERY PLAN                                    
+----------------------------------------------------------------------------------
+ Data Node Scan on t3 "_REMOTE_TABLE_QUERY_"  (cost=0.00..0.00 rows=1000 width=4)
+   Output: t3.id
+   Node/s: datanode1, datanode2
+   Remote query: SELECT id FROM ONLY public.t3 WHERE true
+   Coordinator quals: (t3.id > count_tt1_v())
+(5 rows)
+
+db1=#  select id from t3 where id > count_tt1_v();
+ id 
+----
+(0 rows)
