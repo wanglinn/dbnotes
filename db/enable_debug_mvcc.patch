@@ -1,0 +1,64 @@
+diff --git a/src/backend/utils/misc/guc.c b/src/backend/utils/misc/guc.c
+index 483b42b..679431f 100644
+--- a/src/backend/utils/misc/guc.c
++++ b/src/backend/utils/misc/guc.c
+@@ -130,6 +130,10 @@
+ #define GUC_AGTM_PORT "agtm_port"
+ #endif
+ 
++#ifdef ADBMGRD
++bool enable_debug_mvcc;
++#endif
++
+ /*
+  * Precision with which REAL type guc values are to be printed for GUC
+  * serialization.
+@@ -2096,6 +2100,17 @@ static struct config_bool ConfigureNamesBool[] =
+ 		NULL, NULL, NULL
+ 	},
+ #endif
++#ifdef ADBMGRD
++	{
++		{"enable_debug_mvcc", PGC_USERSET, QUERY_TUNING_METHOD,
++			gettext_noop("funciton HeapTupleSatisfiesMVCC always return true"),
++			NULL
++		},
++		&enable_debug_mvcc,
++		false,
++		NULL,NULL,NULL
++	},
++#endif
+ 
+ #if defined(ADB) || defined(AGTM)
+ 	{
+diff --git a/src/backend/utils/time/tqual.c b/src/backend/utils/time/tqual.c
+index 1457113..bfe33c6 100644
+--- a/src/backend/utils/time/tqual.c
++++ b/src/backend/utils/time/tqual.c
+@@ -1067,6 +1067,11 @@ HeapTupleSatisfiesMVCC(HeapTuple htup, Snapshot snapshot,
+ 	Assert(ItemPointerIsValid(&htup->t_self));
+ 	Assert(htup->t_tableOid != InvalidOid);
+ 
++#ifdef ADBMGRD
++	if (enable_debug_mvcc)
++		return true;
++#endif
++
+ #ifdef ADB
+ 	if(debug_enable_satisfy_mvcc)
+ 		return true;
+diff --git a/src/include/utils/tqual.h b/src/include/utils/tqual.h
+index 44b0765..8bd26ca 100644
+--- a/src/include/utils/tqual.h
++++ b/src/include/utils/tqual.h
+@@ -24,6 +24,10 @@ extern PGDLLIMPORT SnapshotData SnapshotSelfData;
+ extern PGDLLIMPORT SnapshotData SnapshotAnyData;
+ extern PGDLLIMPORT SnapshotData CatalogSnapshotData;
+ 
++#ifdef ADBMGRD
++extern bool enable_debug_mvcc;
++#endif
++
+ #define SnapshotSelf		(&SnapshotSelfData)
+ #define SnapshotAny			(&SnapshotAnyData)
+ 
