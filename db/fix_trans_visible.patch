@@ -1,0 +1,201 @@
+diff --git a/src/adbmgrd/manager/cmd_node.c b/src/adbmgrd/manager/cmd_node.c
+index bbe7647..c5c0748 100644
+--- a/src/adbmgrd/manager/cmd_node.c
++++ b/src/adbmgrd/manager/cmd_node.c
+@@ -6184,13 +6184,14 @@ void mgr_mark_node_in_cluster(Relation rel)
+ Datum mgr_failover_gtm(PG_FUNCTION_ARGS)
+ {
+ 	Relation relNode;
++	HeapScanDesc rel_scan;
+ 	char *nodename;
+ 	bool force_get;
+ 	bool force = false;
+ 	int pingres = PQPING_NO_RESPONSE;
+ 	Oid masterTupleOid;
+ 	HeapTuple masterTuple;
+-	HeapTuple slaveTuple;
++	HeapTuple slaveTuple = NULL;
+ 	HeapTuple tup_result;
+ 	Form_mgr_node mgr_node;
+ 	NameData slaveNodeName;
+@@ -6208,6 +6209,7 @@ Datum mgr_failover_gtm(PG_FUNCTION_ARGS)
+ 	ereport(LOG, (errmsg("check gtm slave status in failover cmd start")));
+ 
+ 	relNode = heap_open(NodeRelationId, RowExclusiveLock);
++	rel_scan = heap_beginscan_catalog(relNode, 0, NULL);
+ 	PG_TRY();
+ 	{
+ 		/* check the gtm master exist */
+@@ -6270,6 +6272,7 @@ Datum mgr_failover_gtm(PG_FUNCTION_ARGS)
+ 
+ 	}PG_CATCH();
+ 	{
++		heap_endscan(rel_scan);
+ 		heap_close(relNode, RowExclusiveLock);
+ 		PG_RE_THROW();
+ 	}PG_END_TRY();
+@@ -6277,16 +6280,27 @@ Datum mgr_failover_gtm(PG_FUNCTION_ARGS)
+ 	ereport(LOG, (errmsg("check gtm slave status in failover cmd end")));
+ 
+ 	initStringInfo(&(getAgentCmdRst.description));
+-	slaveTuple = mgr_get_tuple_node_from_name_type(relNode, slaveNodeName.data);
++	/* get slave tuple */
++	while((slaveTuple = heap_getnext(rel_scan, ForwardScanDirection)) != NULL)
++	{
++		Form_mgr_node mgr_node;
++		mgr_node = (Form_mgr_node)GETSTRUCT(slaveTuple);
++		Assert(mgr_node);
++		if (strcmp(slaveNodeName.data, NameStr(mgr_node->nodename))==0)
++			break;
++	}
++	Assert(HeapTupleIsValid(slaveTuple));
++
+ 	mgr_runmode_cndn_get_result(AGT_CMD_GTM_SLAVE_FAILOVER, &getAgentCmdRst, relNode, slaveTuple, TAKEPLAPARM_N);
+-	heap_freetuple(slaveTuple);
+ 
+ 	tup_result = build_common_command_tuple(
+ 		&(slaveNodeName)
+ 		, getAgentCmdRst.ret
+ 		, getAgentCmdRst.description.data);
+ 	ereport(LOG, (errmsg("the command for failover:\nresult is: %s\ndescription is: %s\n", getAgentCmdRst.ret == true ? "true" : "false", getAgentCmdRst.description.data)));
++
+ 	pfree(getAgentCmdRst.description.data);
++	heap_endscan(rel_scan);
+ 	heap_close(relNode, RowExclusiveLock);
+ 
+ 	return HeapTupleGetDatum(tup_result);
+@@ -6318,16 +6332,20 @@ static void mgr_after_gtm_failover_handle(char *hostaddress, int cndnport, Relat
+ 	HeapTuple tuple;
+ 	HeapTuple mastertuple;
+ 	HeapTuple cn_tuple;
++	HeapTuple newtuple;
+ 	Oid hostOidtmp;
+-	Oid hostOid;
++	Oid nodehost;
+ 	Oid nodemasternameoid;
+ 	Oid newGtmMasterTupleOid;
+ 	Datum datumPath;
++	Datum new_record[Natts_mgr_node];
+ 	bool isNull;
+ 	bool reload_host = false;
+ 	bool reload_port = false;
+ 	bool rest = false;
+ 	bool hasOtherSlave = true;
++	bool new_record_nulls[Natts_mgr_node];
++	bool new_record_repl[Natts_mgr_node];
+ 	char *cndnPathtmp;
+ 	NameData cndnname;
+ 	NameData cnnamedata;
+@@ -6345,6 +6363,7 @@ static void mgr_after_gtm_failover_handle(char *hostaddress, int cndnport, Relat
+ 	int nrow = 0;
+ 	int pingres = PQPING_NO_RESPONSE;
+ 	int syncNum = 0;
++	int nodeport;
+ 	MemoryContext volatile oldcontext = CurrentMemoryContext;
+ 
+ 	initStringInfo(&infosendmsg);
+@@ -6356,16 +6375,17 @@ static void mgr_after_gtm_failover_handle(char *hostaddress, int cndnport, Relat
+ 		newGtmMasterTupleOid = HeapTupleGetOid(aimtuple);
+ 		mgr_node = (Form_mgr_node)GETSTRUCT(aimtuple);
+ 		Assert(mgr_node);
+-		hostOid = mgr_node->nodehost;
++		nodehost = mgr_node->nodehost;
+ 		nodemasternameoid = mgr_node->nodemasternameoid;
+ 		aimtuplenodetype = mgr_node->nodetype;
++		nodeport = mgr_node->nodeport;
+ 
+ 		/*get nodename*/
+ 		namestrcpy(&cndnname,NameStr(mgr_node->nodename));
+ 		sprintf(nodeport_buf, "%d", mgr_node->nodeport);
+ 
+ 		/*wait the new master accept connect*/
+-		mgr_check_node_connect(aimtuplenodetype, mgr_node->nodehost, mgr_node->nodeport);
++		mgr_check_node_connect(aimtuplenodetype, nodehost, nodeport);
+ 
+ 		/*get agtm_port,agtm_host*/
+ 		resetStringInfo(&infosendmsg);
+@@ -6609,27 +6629,27 @@ static void mgr_after_gtm_failover_handle(char *hostaddress, int cndnport, Relat
+ 	mgr_append_pgconf_paras_str_quotastr("synchronous_standby_names", infosendsyncmsg.len !=0 ? infosendsyncmsg.data:"", &infosendmsg);
+ 
+ 	/*refresh new master postgresql.conf*/
+-	address = get_hostaddress_from_hostoid(mgr_node->nodehost);
+-	ereport(LOG, (errmsg("on gtm master \"%s\" reload \"synchronous_standby_names = '%s'\"", NameStr(mgr_node->nodename), infosendsyncmsg.len != 0 ? infosendsyncmsg.data : "")));
+-	ereport(NOTICE, (errmsg("on gtm master \"%s\" reload \"synchronous_standby_names = '%s'\"", NameStr(mgr_node->nodename), infosendsyncmsg.len != 0 ? infosendsyncmsg.data : "")));
++	address = get_hostaddress_from_hostoid(nodehost);
++	ereport(LOG, (errmsg("on gtm master \"%s\" reload \"synchronous_standby_names = '%s'\"", NameStr(cndnname), infosendsyncmsg.len != 0 ? infosendsyncmsg.data : "")));
++	ereport(NOTICE, (errmsg("on gtm master \"%s\" reload \"synchronous_standby_names = '%s'\"", NameStr(cndnname), infosendsyncmsg.len != 0 ? infosendsyncmsg.data : "")));
+ 	try = maxtry;
+ 	while (try-- >= 0)
+ 	{
+ 		resetStringInfo(&(getAgentCmdRst->description));
+-		mgr_send_conf_parameters(AGT_CMD_CNDN_REFRESH_PGSQLCONF_RELOAD, cndnPath, &infosendmsg, hostOid, getAgentCmdRst);
++		mgr_send_conf_parameters(AGT_CMD_CNDN_REFRESH_PGSQLCONF_RELOAD, cndnPath, &infosendmsg, nodehost, getAgentCmdRst);
+ 		/*check*/
+-		if (mgr_check_param_reload_postgresqlconf(mgr_node->nodetype, mgr_node->nodehost, mgr_node->nodeport, address, "synchronous_standby_names", infosendsyncmsg.len != 0 ? infosendsyncmsg.data : ""))
++		if (mgr_check_param_reload_postgresqlconf(aimtuplenodetype, nodehost, nodeport, address, "synchronous_standby_names", infosendsyncmsg.len != 0 ? infosendsyncmsg.data : ""))
+ 			break;
+ 	}
+ 	pfree(infosendsyncmsg.data);
+ 	pfree(address);
+ 	if (try < 0)
+ 	{
+-		ereport(WARNING, (errmsg("on gtm master \"%s\" reload \"synchronous_standby_names\" fail", NameStr(mgr_node->nodename))));
+-		appendStringInfo(&recorderr, "on gtm master \"%s\" reload \"synchronous_standby_names\" fail\n", NameStr(mgr_node->nodename));
++		ereport(WARNING, (errmsg("on gtm master \"%s\" reload \"synchronous_standby_names\" fail", NameStr(cndnname))));
++		appendStringInfo(&recorderr, "on gtm master \"%s\" reload \"synchronous_standby_names\" fail\n", NameStr(cndnname));
+ 	}
+ 
+-	ereport(LOG, (errmsg("refresh \"node\" table in ADB Manager for node \"%s\"", NameStr(mgr_node->nodename))));
++	ereport(LOG, (errmsg("refresh \"node\" table in ADB Manager for node \"%s\"", NameStr(cndnname))));
+ 	mastertuple = SearchSysCache1(NODENODEOID, ObjectIdGetDatum(nodemasternameoid));
+ 	if(!HeapTupleIsValid(mastertuple))
+ 	{
+@@ -6645,14 +6665,24 @@ static void mgr_after_gtm_failover_handle(char *hostaddress, int cndnport, Relat
+ 		ReleaseSysCache(mastertuple);
+ 	}
+ 	/*change slave type to master type*/
+-	mgr_node = (Form_mgr_node)GETSTRUCT(aimtuple);
+-	Assert(mgr_node);
+-	mgr_node->nodetype = GTM_TYPE_GTM_MASTER;
+-	mgr_node->nodemasternameoid = 0;
+-	namestrcpy(&(mgr_node->nodesync), "");
+-	heap_inplace_update(noderel, aimtuple);
++	memset(new_record, 0, sizeof(new_record));
++	memset(new_record_nulls, 0, sizeof(new_record_nulls));
++	memset(new_record_repl, 0, sizeof(new_record_repl));
++
++	new_record[Anum_mgr_node_nodetype - 1] = CharGetDatum(GTM_TYPE_GTM_MASTER);
++	new_record[Anum_mgr_node_nodemasternameOid - 1] = ObjectIdGetDatum(0);
++	new_record[Anum_mgr_node_nodesync - 1] = CStringGetDatum("");
++
++	new_record_repl[Anum_mgr_node_nodemasternameOid - 1] = true;
++	new_record_repl[Anum_mgr_node_nodetype - 1]  = true;
++	new_record_repl[Anum_mgr_node_nodesync - 1] = true;
++
++	newtuple = heap_modify_tuple(aimtuple, RelationGetDescr(noderel),
++					new_record, new_record_nulls, new_record_repl);
++	CatalogTupleUpdate(noderel, &aimtuple->t_self, newtuple);
++
+ 	/*for mgr_updateparm systbl, drop the old master param, update slave parm info in the mgr_updateparm systbl*/
+-	ereport(LOG, (errmsg("refresh \"param\" table in ADB Manager for node \"%s\"", NameStr(mgr_node->nodename))));
++	ereport(LOG, (errmsg("refresh \"param\" table in ADB Manager for node \"%s\"", NameStr(cndnname))));
+ 	mgr_parm_after_gtm_failover_handle(&masterNodeName, GTM_TYPE_GTM_MASTER, &cndnname, aimtuplenodetype);
+ 
+ 	if (!hasOtherSlave)
+@@ -6692,14 +6722,14 @@ static void mgr_after_gtm_failover_handle(char *hostaddress, int cndnport, Relat
+ 		mgr_send_conf_parameters(AGT_CMD_CNDN_REFRESH_PGHBACONF,
+ 								cndnPath,
+ 								&infosendmsg,
+-								mgr_node->nodehost,
++								nodehost,
+ 								getAgentCmdRst);
+ 		if (!getAgentCmdRst->ret)
+ 		{
+ 			ereport(WARNING, (errmsg("refresh pg_hba.conf of new gtm master for agtm slave %s fail", NameStr(mgr_nodetmp->nodename))));
+ 			appendStringInfo(&recorderr, "refresh pg_hba.conf of new gtm master for agtm slave %s fail\n", NameStr(mgr_nodetmp->nodename));
+ 		}
+-		mgr_reload_conf(mgr_node->nodehost, cndnPath);
++		mgr_reload_conf(nodehost, cndnPath);
+ 
+ 		/*refresh gtm slave recovery.conf*/
+ 		resetStringInfo(&(getAgentCmdRst->description));
