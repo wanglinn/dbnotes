@@ -1,0 +1,62 @@
+diff --git a/src/backend/access/heap/heapam_visibility.c b/src/backend/access/heap/heapam_visibility.c
+index 6cb38f8..47aaf0e 100644
+--- a/src/backend/access/heap/heapam_visibility.c
++++ b/src/backend/access/heap/heapam_visibility.c
+@@ -77,6 +77,9 @@
+ #include "utils/snapmgr.h"
+ 
+ 
++
++extern bool enable_debug_mvcc;
++
+ /*
+  * SetHintBits()
+  *
+@@ -952,6 +955,9 @@ HeapTupleSatisfiesMVCC(HeapTuple htup, Snapshot snapshot,
+ 	Assert(ItemPointerIsValid(&htup->t_self));
+ 	Assert(htup->t_tableOid != InvalidOid);
+ 
++	if (enable_debug_mvcc)
++		return true;
++
+ 	if (!HeapTupleHeaderXminCommitted(tuple))
+ 	{
+ 		if (HeapTupleHeaderXminInvalid(tuple))
+diff --git a/src/backend/utils/misc/guc.c b/src/backend/utils/misc/guc.c
+index aa564d1..6b310a3 100644
+--- a/src/backend/utils/misc/guc.c
++++ b/src/backend/utils/misc/guc.c
+@@ -109,6 +109,8 @@
+ #define CONFIG_EXEC_PARAMS_NEW "global/config_exec_params.new"
+ #endif
+ 
++bool enable_debug_mvcc;
++
+ /*
+  * Precision with which REAL type guc values are to be printed for GUC
+  * serialization.
+@@ -1909,6 +1911,16 @@ static struct config_bool ConfigureNamesBool[] =
+ 		NULL, NULL, NULL
+ 	},
+ 
++	{
++		{"enable_debug_mvcc", PGC_USERSET, QUERY_TUNING_METHOD,
++			gettext_noop("funciton HeapTupleSatisfiesMVCC always return true"),
++			NULL
++		},
++		&enable_debug_mvcc,
++		false,
++		NULL,NULL,NULL
++	},
++
+ 	/* End-of-list marker */
+ 	{
+ 		{NULL, 0, 0, NULL, NULL}, NULL, false, NULL, NULL, NULL
+@@ -2324,7 +2336,6 @@ static struct config_int ConfigureNamesInt[] =
+ 		NULL, NULL, NULL
+ 	},
+ #endif
+-
+ 	{
+ 		{"statement_timeout", PGC_USERSET, CLIENT_CONN_STATEMENT,
+ 			gettext_noop("Sets the maximum allowed duration of any statement."),
