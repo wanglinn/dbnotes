@@ -1,0 +1,214 @@
+版本 postgresql 10.3
+以下内容是从语法实现到函数的实现，实现 create foreign table 的功能。
+
+1. 规划使用foreign table 的语法结构
+
+CREATE SERVER file_server FOREIGN DATA WRAPPER file_fdw;
+
+CREATE USER MAPPING FOR user1 SERVER file_server;
+
+CREATE FOREIGN TABLE agg_text (
+    a   int2,
+    b   float4
+) SERVER file_server
+OPTIONS (format 'text', filename '/home/user1/data/agg.data', delimiter ',', null '\N');
+
+
+2. 规划系统表结构
+
+postgres=# \dS+ pg_foreign_server
+                              Table "pg_catalog.pg_foreign_server"
+   Column   |   Type    | Collation | Nullable | Default | Storage  | Stats target | Description 
+------------+-----------+-----------+----------+---------+----------+--------------+-------------
+ srvname    | name      |           | not null |         | plain    |              | 
+ srvowner   | oid       |           | not null |         | plain    |              | 
+ srvfdw     | oid       |           | not null |         | plain    |              | 
+ srvtype    | text      |           |          |         | extended |              | 
+ srvversion | text      |           |          |         | extended |              | 
+ srvacl     | aclitem[] |           |          |         | extended |              | 
+ srvoptions | text[]    |           |          |         | extended |              | 
+Indexes:
+    "pg_foreign_server_name_index" UNIQUE, btree (srvname)
+    "pg_foreign_server_oid_index" UNIQUE, btree (oid)
+Has OIDs: yes
+
+
+postgres=# \dS+ pg_foreign_data_wrapper
+                            Table "pg_catalog.pg_foreign_data_wrapper"
+    Column    |   Type    | Collation | Nullable | Default | Storage  | Stats target | Description 
+--------------+-----------+-----------+----------+---------+----------+--------------+-------------
+ fdwname      | name      |           | not null |         | plain    |              | 
+ fdwowner     | oid       |           | not null |         | plain    |              | 
+ fdwhandler   | oid       |           | not null |         | plain    |              | 
+ fdwvalidator | oid       |           | not null |         | plain    |              | 
+ fdwacl       | aclitem[] |           |          |         | extended |              | 
+ fdwoptions   | text[]    |           |          |         | extended |              | 
+Indexes:
+    "pg_foreign_data_wrapper_name_index" UNIQUE, btree (fdwname)
+    "pg_foreign_data_wrapper_oid_index" UNIQUE, btree (oid)
+Has OIDs: yes
+
+postgres=# \dS+ pg_foreign_table
+                             Table "pg_catalog.pg_foreign_table"
+  Column   |  Type  | Collation | Nullable | Default | Storage  | Stats target | Description 
+-----------+--------+-----------+----------+---------+----------+--------------+-------------
+ ftrelid   | oid    |           | not null |         | plain    |              | 
+ ftserver  | oid    |           | not null |         | plain    |              | 
+ ftoptions | text[] |           |          |         | extended |              | 
+Indexes:
+    "pg_foreign_table_relid_index" UNIQUE, btree (ftrelid)
+
+
+3. 规划create foreign table 对应的结构体 CreateForeignTableStmt
+
+在 parsenodes.h 文件中
+
+typedef struct CreateForeignTableStmt
+{
+	CreateStmt	base;
+	char	   *servername;
+	List	   *options;
+} CreateForeignTableStmt;
+
+在node.h 文件中的 enum NodeTag 枚举类型中添加
+T_CreateForeignTableStmt,
+
+
+4. 添加语法内容
+
+在gram.y中
+
+CREATE FOREIGN TABLE relname (...) SERVER name (...)
+
+CreateForeignTableStmt:
+		CREATE FOREIGN TABLE qualified_name
+			'(' OptTableElementList ')'
+			OptInherit SERVER name create_generic_options
+				{
+					CreateForeignTableStmt *n = makeNode(CreateForeignTableStmt);
+					$4->relpersistence = RELPERSISTENCE_PERMANENT;
+					n->base.relation = $4;
+					n->base.tableElts = $6;
+					n->base.inhRelations = $8;
+					n->base.ofTypename = NULL;
+					n->base.constraints = NIL;
+					n->base.options = NIL;
+					n->base.oncommit = ONCOMMIT_NOOP;
+					n->base.tablespacename = NULL;
+					n->base.if_not_exists = false;
+					/* FDW-specific data */
+					n->servername = $10;
+					n->options = $11;
+					$$ = (Node *) n;
+				}
+
+
+5. 语法处理
+在文件 src/backend/tcop/utility.c  函数 ProcessUtilitySlow 中
+
+case T_CreateForeignTableStmt:
+    stmts = transformCreateStmt((CreateStmt *) parsetree,
+            queryString);
+    if (IsA(stmt, CreateForeignTableStmt))
+    {
+        /* Create the table itself */
+        address = DefineRelation((CreateStmt *) stmt,
+                RELKIND_FOREIGN_TABLE,
+                InvalidOid, NULL,
+                queryString);
+        CreateForeignTable((CreateForeignTableStmt *) stmt, address.objectId);
+        EventTriggerCollectSimpleCommand(address, secondaryObject,stmt);
+
+    }
+
+在 函数 const char *CreateCommandTag(Node *parsetree) 中
+case T_CreateForeignTableStmt:
+    tag = "CREATE FOREIGN TABLE";
+    break;
+
+6. create foreign table 函数实现
+
+在文件 src/backend/commands/foreigncmds.c 中 定义 CreateForeignTable 函数
+
+/*
+ * Create a foreign table
+ * call after DefineRelation().
+ */
+void
+CreateForeignTable(CreateForeignTableStmt *stmt, Oid relid)
+{
+	Relation	ftrel;
+	Datum		ftoptions;
+	Datum		values[Natts_pg_foreign_table];
+	bool		nulls[Natts_pg_foreign_table];
+	HeapTuple	tuple;
+	AclResult	aclresult;
+	ObjectAddress myself;
+	ObjectAddress referenced;
+	Oid			ownerId;
+	ForeignDataWrapper *fdw;
+	ForeignServer *server;
+
+	/*
+	 * Advance command counter to ensure the pg_attribute tuple is visible;
+	 * the tuple might be updated to add constraints in previous step.
+	 */
+	CommandCounterIncrement();
+
+	ftrel = heap_open(ForeignTableRelationId, RowExclusiveLock);
+
+	/*
+	 * For now the owner cannot be specified on create. Use effective user ID.
+	 */
+	ownerId = GetUserId();
+
+	/*
+	 * Check that the foreign server exists and that we have USAGE on it. Also
+	 * get the actual FDW for option validation etc.
+	 */
+	server = GetForeignServerByName(stmt->servername, false);
+	aclresult = pg_foreign_server_aclcheck(server->serverid, ownerId, ACL_USAGE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, ACL_KIND_FOREIGN_SERVER, server->servername);
+
+	fdw = GetForeignDataWrapper(server->fdwid);
+
+	/*
+	 * Insert tuple into pg_foreign_table.
+	 */
+	memset(values, 0, sizeof(values));
+	memset(nulls, false, sizeof(nulls));
+
+	values[Anum_pg_foreign_table_ftrelid - 1] = ObjectIdGetDatum(relid);
+	values[Anum_pg_foreign_table_ftserver - 1] = ObjectIdGetDatum(server->serverid);
+	/* Add table generic options */
+	ftoptions = transformGenericOptions(ForeignTableRelationId,
+										PointerGetDatum(NULL),
+										stmt->options,
+										fdw->fdwvalidator);
+
+	if (PointerIsValid(DatumGetPointer(ftoptions)))
+		values[Anum_pg_foreign_table_ftoptions - 1] = ftoptions;
+	else
+		nulls[Anum_pg_foreign_table_ftoptions - 1] = true;
+
+	tuple = heap_form_tuple(ftrel->rd_att, values, nulls);
+
+	CatalogTupleInsert(ftrel, tuple);
+
+	heap_freetuple(tuple);
+
+	/* Add pg_class dependency on the server */
+	myself.classId = RelationRelationId;
+	myself.objectId = relid;
+	myself.objectSubId = 0;
+
+	referenced.classId = ForeignServerRelationId;
+	referenced.objectId = server->serverid;
+	referenced.objectSubId = 0;
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+
+	heap_close(ftrel, RowExclusiveLock);
+}
+
+
