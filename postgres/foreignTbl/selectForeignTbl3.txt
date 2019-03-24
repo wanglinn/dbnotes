@@ -1,0 +1,123 @@
+外表执行逻辑实现
+
+1. 执行函数是 ExecForeignScan ， 在执行前 相关内容初始化
+
+nodetag 为 T_ForeignScanState
+
+
+/* ----------------
+ *     ForeignScanState information
+ *
+ *        ForeignScan nodes are used to scan foreign-data tables.
+ * ----------------
+ */
+typedef struct ForeignScanState
+{
+    ScanState    ss;                /* its first field is NodeTag */
+    ExprState  *fdw_recheck_quals;    /* original quals not in ss.ps.qual */
+    Size        pscan_len;        /* size of parallel coordination information */
+    /* use struct pointer to avoid including fdwapi.h here */
+    struct FdwRoutine *fdwroutine;
+    void       *fdw_state;        /* foreign-data wrapper can keep state here */
+} ForeignScanState;
+
+在 ExecInitNode 函数 中添加
+
+        case T_ForeignScan:
+            result = (PlanState *) ExecInitForeignScan((ForeignScan *) node,
+                                                       estate, eflags);
+            break;
+
+函数 ExecInitForeignScan 的实现， 在该函数中，会标记出 实际执行的函数：
+scanstate = makeNode(ForeignScanState);
+scanstate->ss.ps.ExecProcNode = ExecForeignScan;
+
+现在需要知道 nodetag T_ForeignScanState 如何生成的
+见文件 nodeForeignscan.c
+#0  ExecInitForeignScan (node=0x1e0e028, estate=0x1dab2c0, eflags=16) at nodeForeignscan.c:135
+#1  0x0000000000748d47 in ExecInitNode (node=0x1e0e028, estate=0x1dab2c0, eflags=16) at execProcnode.c:277
+#2  0x00000000007411cd in InitPlan (queryDesc=0x1db6650, eflags=16) at execMain.c:1046
+#3  0x0000000000740896 in standard_ExecutorStart (queryDesc=0x1db6650, eflags=16) at execMain.c:265
+#4  0x00000000007405d3 in ExecutorStart (queryDesc=0x1db6650, eflags=0) at execMain.c:153
+#5  0x0000000000961d6c in PortalStart (portal=0x1e42d30, params=0x0, eflags=0, snapshot=0x0) at pquery.c:520
+#6  0x000000000095dc23 in exec_simple_query (query_string=0x1e0d230 "select * from agg_text ;") at postgres.c:1083
+#7  0x000000000095d0e4 in PostgresMain (argc=1, argv=0x1db9740, dbname=0x1d8de50 "postgres", username=0x1db95a8 "user1")
+    at postgres.c:4117
+#8  0x000000000089d316 in BackendRun (port=0x1daf000) at postmaster.c:4405
+#9  0x000000000089c940 in BackendStartup (port=0x1daf000) at postmaster.c:4077
+#10 0x0000000000898e1c in ServerLoop () at postmaster.c:1755
+#11 0x0000000000896344 in PostmasterMain (argc=1, argv=0x1d8bd10) at postmaster.c:1363
+#12 0x00000000007b3550 in main (argc=1, argv=0x1d8bd10) at main.c:228
+
+
+2. 添加实际执行函数 ExecForeignScan
+
+/* ----------------------------------------------------------------
+ *        ExecForeignScan(node)
+ *
+ *        Fetches the next tuple from the FDW, checks local quals, and
+ *        returns it.
+ *        We call the ExecScan() routine and pass it the appropriate
+ *        access method functions.
+ * ----------------------------------------------------------------
+ */
+static TupleTableSlot *
+ExecForeignScan(PlanState *pstate)
+{
+    ForeignScanState *node = castNode(ForeignScanState, pstate);
+
+    return ExecScan(&node->ss,
+                    (ExecScanAccessMtd) ForeignNext,
+                    (ExecScanRecheckMtd) ForeignRecheck);
+}
+
+#0  fileIterateForeignScan (node=0x1e084f8) at file_fdw.c:690
+#1  0x0000000000783adc in ForeignNext (node=0x1e084f8) at nodeForeignscan.c:54
+#2  0x000000000074af50 in ExecScanFetch (node=0x1e084f8, accessMtd=0x783a60 <ForeignNext>, recheckMtd=0x783b60 <ForeignRecheck>)
+    at execScan.c:97
+#3  0x000000000074ac22 in ExecScan (node=0x1e084f8, accessMtd=0x783a60 <ForeignNext>, recheckMtd=0x783b60 <ForeignRecheck>)
+    at execScan.c:147
+#4  0x0000000000783604 in ExecForeignScan (pstate=0x1e084f8) at nodeForeignscan.c:121
+#5  0x00000000007490b6 in ExecProcNodeFirst (node=0x1e084f8) at execProcnode.c:430
+
+主要函数 ExecForeignScan
+#0  ExecForeignScan (pstate=0x1e084f8) at nodeForeignscan.c:119
+#1  0x00000000007490b6 in ExecProcNodeFirst (node=0x1e084f8) at execProcnode.c:430
+#2  0x0000000000745d65 in ExecProcNode (node=0x1e084f8) at ../../../src/include/executor/executor.h:250
+#3  0x0000000000741719 in ExecutePlan (estate=0x1e082e0, planstate=0x1e084f8, use_parallel_mode=0 '\000', operation=CMD_SELECT, 
+    sendTuples=1 '\001', numberTuples=0, direction=ForwardScanDirection, dest=0x1dad0d0, execute_once=1 '\001') at execMain.c:1723
+#4  0x00000000007415d4 in standard_ExecutorRun (queryDesc=0x1db6650, direction=ForwardScanDirection, count=0, execute_once=1 '\001')
+    at execMain.c:364
+#5  0x000000000074135c in ExecutorRun (queryDesc=0x1db6650, direction=ForwardScanDirection, count=0, execute_once=1 '\001')
+    at execMain.c:307
+#6  0x0000000000962997 in PortalRunSelect (portal=0x1e42d30, forward=1 '\001', count=0, dest=0x1dad0d0) at pquery.c:932
+#7  0x000000000096243b in PortalRun (portal=0x1e42d30, count=9223372036854775807, isTopLevel=1 '\001', run_once=1 '\001', 
+    dest=0x1dad0d0, altdest=0x1dad0d0, completionTag=0x7ffecab17460 "") at pquery.c:773
+#8  0x000000000095dd63 in exec_simple_query (query_string=0x1e0d230 "select * from agg_text ;") at postgres.c:1122
+#9  0x000000000095d0e4 in PostgresMain (argc=1, argv=0x1db9740, dbname=0x1d8de50 "postgres", username=0x1db95a8 "user1")
+    at postgres.c:4117
+#10 0x000000000089d316 in BackendRun (port=0x1daf000) at postmaster.c:4405
+#11 0x000000000089c940 in BackendStartup (port=0x1daf000) at postmaster.c:4077
+#12 0x0000000000898e1c in ServerLoop () at postmaster.c:1755
+#13 0x0000000000896344 in PostmasterMain (argc=1, argv=0x1d8bd10) at postmaster.c:1363
+#14 0x00000000007b3550 in main (argc=1, argv=0x1d8bd10) at main.c:228
+
+
+
+在函数 static TupleTableSlot *ExecProcNodeFirst(PlanState *node)  中
+
+return node->ExecProcNode(node);
+
+(gdb) p *node
+$3 = {type = T_ForeignScanState, plan = 0x1e0e028, state = 0x1e082e0, ExecProcNode = 0x7835c0 <ExecForeignScan>, 
+  ExecProcNodeReal = 0x7835c0 <ExecForeignScan>, instrument = 0x0, worker_instrument = 0x0, qual = 0x0, lefttree = 0x0,
+  righttree = 0x0, initPlan = 0x0, subPlan = 0x0, chgParam = 0x0, ps_ResultTupleSlot = 0x1e08708, ps_ExprContext = 0x1e08610, 
+  ps_ProjInfo = 0x0}
+(gdb) p *node->ExecProcNode
+$4 = {TupleTableSlot *(struct PlanState *)} 0x7835c0 <ExecForeignScan>
+
+
+
+
+
+
