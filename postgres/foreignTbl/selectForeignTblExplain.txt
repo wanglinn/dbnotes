@@ -1,0 +1,78 @@
+外表 执行计划的生成
+
+
+(gdb) bt
+#0  ExplainOneQuery (query=0x1db6e78, cursorOptions=256, into=0x0, es=0x1db6938, 
+    queryString=0x1e0d230 "explain verbose select * from agg_text ;", params=0x0, queryEnv=0x0) at explain.c:347
+#1  0x000000000069beda in ExplainQuery (pstate=0x1db6820, stmt=0x1e0dfb0, 
+    queryString=0x1e0d230 "explain verbose select * from agg_text ;", params=0x0, queryEnv=0x0, dest=0x1db6788) at explain.c:256
+#2  0x0000000000964c08 in standard_ProcessUtility (pstmt=0x1e0ecb8, 
+    queryString=0x1e0d230 "explain verbose select * from agg_text ;", context=PROCESS_UTILITY_TOPLEVEL, params=0x0, queryEnv=0x0, 
+    dest=0x1db6788, completionTag=0x7ffecab171b0 "") at utility.c:683
+#3  0x0000000000964399 in ProcessUtility (pstmt=0x1e0ecb8, queryString=0x1e0d230 "explain verbose select * from agg_text ;", 
+    context=PROCESS_UTILITY_TOPLEVEL, params=0x0, queryEnv=0x0, dest=0x1db6788, completionTag=0x7ffecab171b0 "") at utility.c:357
+#4  0x0000000000963db5 in PortalRunUtility (portal=0x1e42d30, pstmt=0x1e0ecb8, isTopLevel=1 '\001', setHoldSnapshot=1 '\001', 
+    dest=0x1db6788, completionTag=0x7ffecab171b0 "") at pquery.c:1178
+#5  0x00000000009627cf in FillPortalStore (portal=0x1e42d30, isTopLevel=1 '\001') at pquery.c:1038
+#6  0x0000000000962425 in PortalRun (portal=0x1e42d30, count=9223372036854775807, isTopLevel=1 '\001', run_once=1 '\001', 
+    dest=0x1e0edb0, altdest=0x1e0edb0, completionTag=0x7ffecab17460 "") at pquery.c:768
+#7  0x000000000095dd63 in exec_simple_query (query_string=0x1e0d230 "explain verbose select * from agg_text ;") at postgres.c:1122
+
+
+在函数 ExplainNode 中添加
+
+		case T_ForeignScan:
+			sname = "Foreign Scan";
+			switch (((ForeignScan *) plan)->operation)
+			{
+				case CMD_SELECT:
+					pname = "Foreign Scan";
+					operation = "Select";
+					break;
+				case CMD_INSERT:
+					pname = "Foreign Insert";
+					operation = "Insert";
+					break;
+				case CMD_UPDATE:
+					pname = "Foreign Update";
+					operation = "Update";
+					break;
+				case CMD_DELETE:
+					pname = "Foreign Delete";
+					operation = "Delete";
+					break;
+				default:
+					pname = "???";
+					break;
+			}
+			break;
+
+
+在 函数 ExplainNode 中添加
+
+case T_ForeignScan:
+
+
+在函数 show_plan_tlist 中添加 
+if (IsA(plan, ForeignScan) &&
+    ((ForeignScan *) plan)->operation != CMD_SELECT)
+    return;
+
+在 函数 set_deparse_planstate  中添加
+else if (IsA(ps->plan, ForeignScan))
+    dpns->index_tlist = ((ForeignScan *) ps->plan)->fdw_scan_tlist; 
+
+在函数 ExplainNode 中添加
+
+case T_ForeignScan:
+    show_scan_qual(plan->qual, "Filter", planstate, ancestors, es);
+    if (plan->qual)
+        show_instrumentation_count("Rows Removed by Filter", 1,
+            planstate, es);
+    show_foreignscan_info((ForeignScanState *) planstate, es);
+    break;
+
+添加函数 show_foreignscan_info
+添加函数 fileExplainForeignScan
+
+
