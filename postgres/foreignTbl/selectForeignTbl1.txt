@@ -1,0 +1,174 @@
+查找外部表实现逻辑介绍
+
+1. 总体描述
+
+外部表即在系统表pg_foreign_table中记录了table oid, server oid及表创建时附带的参数内容。
+可以将外部表看作为普通表，但是由于其数据格式不是按照数据库定义存储的，而是数据文件类型
+，因此在去存储区域查找数据不能按原来默认的表的存储方式去查找，而是需要通过读取文件的方式，而
+copy from 也正是从外部数据文件读取文件的形式，因此在执行阶段实际用到的是copy方式读取外部表数据。
+
+需要关注3个方面：path, plan， execute
+
+对应3个函数
+create_foreignscan_path
+create_foreignscan_plan
+ExecForeignScan
+
+外部表有些内容区别于普通表，需要在结构体  struct RelOptInfo 中新增
+struct FdwRoutine *fdwroutine;
+void       *fdw_private;
+
+2. create_foreignscan_path 函数实现
+
+foreign table 可以看作是普通表，只需要在查找是foreign talbe时，将其查找path 添加到 总path中就可以。
+
+在函数 static void set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTblEntry *rte)
+中添加
+case RTE_RELATION:
+    if (rte->relkind == RELKIND_FOREIGN_TABLE)
+    {
+        /* Foreign table */
+        set_foreign_pathlist(root, rel, rte);
+    }
+
+函数 set_foreign_pathlist
+/*
+ * set_foreign_pathlist
+ *        Build access paths for a foreign table RTE
+ */
+static void
+set_foreign_pathlist(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+    /* Call the FDW's GetForeignPaths function to generate path(s) */
+    rel->fdwroutine->GetForeignPaths(root, rel, rte->relid);
+}
+
+rel->fdwroutine->GetForeignPaths 是个函数指针， 对应fileGetForeignPaths
+
+函数 fileGetForeignPaths 实现
+
+/*
+ * fileGetForeignPaths
+ *        Create possible access paths for a scan on the foreign table
+ *
+ *        Currently we don't support any push-down feature, so there is only one
+ *        possible access path, which simply returns all records in the order in
+ *        the data file.
+ */
+static void
+fileGetForeignPaths(PlannerInfo *root,
+                    RelOptInfo *baserel,
+                    Oid foreigntableid)
+{
+    FileFdwPlanState *fdw_private = (FileFdwPlanState *) baserel->fdw_private;
+    Cost        startup_cost;
+    Cost        total_cost;
+    List       *columns;
+    List       *coptions = NIL;
+
+    /* Decide whether to selectively perform binary conversion */
+    if (check_selective_binary_conversion(baserel,
+                                          foreigntableid,
+                                          &columns))
+        coptions = list_make1(makeDefElem("convert_selectively",
+                                          (Node *) columns, -1));
+
+    /* Estimate costs */
+    estimate_costs(root, baserel, fdw_private,
+                   &startup_cost, &total_cost);
+
+    /*
+     * Create a ForeignPath node and add it as only possible path.  We use the
+     * fdw_private list of the path to carry the convert_selectively option;
+     * it will be propagated into the fdw_private list of the Plan node.
+     */
+    add_path(baserel, (Path *)
+             create_foreignscan_path(root, baserel,
+                                     NULL,    /* default pathtarget */
+                                     baserel->rows,
+                                     startup_cost,
+                                     total_cost,
+                                     NIL,    /* no pathkeys */
+                                     NULL,    /* no outer rel either */
+                                     NULL,    /* no extra plan */
+                                     coptions));
+
+    /*
+     * If data file was sorted, and we knew it somehow, we could insert
+     * appropriate pathkeys into the ForeignPath node to tell the planner
+     * that.
+     */
+}
+
+             
+下面时主要函数 create_foreignscan_path 的实现
+
+
+/*
+ * create_foreignscan_path
+ *      Creates a path corresponding to a scan of a foreign table, foreign join,
+ *      or foreign upper-relation processing, returning the pathnode.
+ *
+ * This function is never called from core Postgres; rather, it's expected
+ * to be called by the GetForeignPaths, GetForeignJoinPaths, or
+ * GetForeignUpperPaths function of a foreign data wrapper.  We make the FDW
+ * supply all fields of the path, since we do not have any way to calculate
+ * them in core.  However, there is a usually-sane default for the pathtarget
+ * (rel->reltarget), so we let a NULL for "target" select that.
+ */
+ForeignPath *
+create_foreignscan_path(PlannerInfo *root, RelOptInfo *rel,
+                        PathTarget *target,
+                        double rows, Cost startup_cost, Cost total_cost,
+                        List *pathkeys,
+                        Relids required_outer,
+                        Path *fdw_outerpath,
+                        List *fdw_private)
+{
+    ForeignPath *pathnode = makeNode(ForeignPath);
+
+    pathnode->path.pathtype = T_ForeignScan;
+    pathnode->path.parent = rel;
+    pathnode->path.pathtarget = target ? target : rel->reltarget;
+    pathnode->path.param_info = get_baserel_parampathinfo(root, rel,
+                                                          required_outer);
+    pathnode->path.parallel_aware = false;
+    pathnode->path.parallel_safe = rel->consider_parallel;
+    pathnode->path.parallel_workers = 0;
+    pathnode->path.rows = rows;
+    pathnode->path.startup_cost = startup_cost;
+    pathnode->path.total_cost = total_cost;
+    pathnode->path.pathkeys = pathkeys;
+
+    pathnode->fdw_outerpath = fdw_outerpath;
+    pathnode->fdw_private = fdw_private;
+
+    return pathnode;
+}
+
+注意其用到的是 T_ForeignScan
+
+
+#0  create_foreignscan_path (root=0x215e7d8, rel=0x215ec28, target=0x0, rows=1, startup_cost=0, total_cost=1.1000000000000001, 
+    pathkeys=0x0, required_outer=0x0, fdw_outerpath=0x0, fdw_private=0x0) at pathnode.c:1968
+#1  0x00007f6f40174f13 in fileGetForeignPaths (root=0x215e7d8, baserel=0x215ec28, foreigntableid=34573) at file_fdw.c:546
+#2  0x000000000080ab4e in set_foreign_pathlist (root=0x215e7d8, rel=0x215ec28, rte=0x215dea8) at allpaths.c:857
+#3  0x000000000080a893 in set_rel_pathlist (root=0x215e7d8, rel=0x215ec28, rti=1, rte=0x215dea8) at allpaths.c:441
+#4  0x0000000000809e8e in set_base_rel_pathlists (root=0x215e7d8) at allpaths.c:309
+#5  0x0000000000809bb4 in make_one_rel (root=0x215e7d8, joinlist=0x21a6278) at allpaths.c:179
+#6  0x000000000083ef5e in query_planner (root=0x215e7d8, tlist=0x215eac8, qp_callback=0x844ec0 <standard_qp_callback>, 
+    qp_extra=0x7ffdb16fa230) at planmain.c:259
+#7  0x00000000008427a4 in grouping_planner (root=0x215e7d8, inheritance_update=0 '\000', tuple_fraction=0) at planner.c:1707
+#8  0x000000000084058c in subquery_planner (glob=0x215e740, parse=0x215dd90, parent_root=0x0, hasRecursion=0 '\000', 
+    tuple_fraction=0) at planner.c:861
+#9  0x000000000083f31e in standard_planner (parse=0x215dd90, cursorOptions=256, boundParams=0x0) at planner.c:333
+#10 0x000000000083f043 in planner (parse=0x215dd90, cursorOptions=256, boundParams=0x0) at planner.c:209
+#11 0x000000000095af2d in pg_plan_query (querytree=0x215dd90, cursorOptions=256, boundParams=0x0) at postgres.c:819
+#12 0x000000000095b081 in pg_plan_queries (querytrees=0x215e708, cursorOptions=256, boundParams=0x0) at postgres.c:885
+#13 0x000000000095db66 in exec_simple_query (query_string=0x215ce80 "select * from agg_text;") at postgres.c:1050
+
+
+
+
+
+
