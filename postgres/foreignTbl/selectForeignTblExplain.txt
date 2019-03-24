@@ -76,3 +76,27 @@ case T_ForeignScan:
 添加函数 fileExplainForeignScan
 
 
+postgres=# explain verbose select * from agg_text;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Gather  (cost=1000.00..1001.20 rows=1 width=6)
+   Output: a, b
+   Workers Planned: 1
+   Single Copy: true
+      Foreign Scan on public.agg_text  (cost=0.00..1.10 rows=1 width=6)
+         Output: a, b
+         Foreign File: /home/user1/data/agg.data
+         Foreign File Size: 12
+(8 rows)
+
+postgres=# set force_parallel_mode  = off;
+SET
+postgres=# explain verbose select * from agg_text;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Foreign Scan on public.agg_text  (cost=0.00..1.10 rows=1 width=6)
+   Output: a, b
+   Foreign File: /home/user1/data/agg.data
+   Foreign File Size: 12
+(4 rows)
+
