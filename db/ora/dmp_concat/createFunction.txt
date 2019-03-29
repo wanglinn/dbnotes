@@ -1,0 +1,71 @@
+文件 dmp_concat.c 主要作用是定义了用来服务aggregate 的 dmp_concat, dmp_concat_distinct, dmp_concat_dup 的函数
+：ora_string_agg_transfn, ora_string_agg_finalfn
+  ora_distinct_string_agg_transfn, ora_distinct_string_agg_finalfn
+说明：dmp_concat(colname) 等同于 string_agg(colname, ',')
+     dmp_concat_distinct(colname) 等同于 string_agg(distinct colname, ',')
+	 dmp_concat_dup 同 dmp_concat_distinct 是一样的
+
+文件 dmp_concat.c 不同于 dmp_concat_old.c 文件在于：对给定字符串 查找新来的colvalue 是否已经在字符串中，
+dmp_concat.c 文件中用到的是hashstore，新来的元素都会存到hashstore中，判断是否在其中，就需要查找这个hashstore；
+dmp_concat_old.c 文件中用到的是利用间隔符',' 来划分字符串，判断划分的元素是否有等于新来的colvalue
+，不过该方法存在不对的场景：之前的colvalue包含间隔符。
+
+效率：对10数字的text类型的表中（大小170万行），用select string_agg(distinct id1) from t1 执行，时间5.5秒；
+用hashstore方式判断colvaule是否存在的 select dmp_concat_distinct(id1) from t1 执行，时间6.2秒；
+用dmp_concat_old.c 文件中 strtok_r 方式的 select dmp_concat_distinct(id1) from t1 执行，时间2.5秒；
+
+
+make  会生成dmp_concat.so文件
+将该dmp_concat.so 文件cp 到 $libdir 文件夹下($libdir 即 pg_config --pkglibdir 指向的路径)，
+然后执行create 操作
+
+CREATE FUNCTION ora_string_agg_transfn(internal, text)
+RETURNS internal
+AS '$libdir/dmp_concat', 'ora_string_agg_transfn'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION ora_string_agg_finalfn(internal)
+RETURNS text
+AS '$libdir/dmp_concat', 'ora_string_agg_finalfn'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION ora_distinct_string_agg_transfn(internal, text)
+RETURNS internal
+AS '$libdir/dmp_concat', 'ora_distinct_string_agg_transfn'
+LANGUAGE C VOLATILE;
+
+CREATE FUNCTION ora_distinct_string_agg_finalfn(internal)
+RETURNS text
+AS '$libdir/dmp_concat', 'ora_distinct_string_agg_finalfn'
+LANGUAGE C VOLATILE;
+
+CREATE AGGREGATE dmp_concat(text)
+(
+ SFUNC = ora_string_agg_transfn,
+ STYPE = internal,
+ finalfunc = ora_string_agg_finalfn
+);
+
+CREATE AGGREGATE dmp_concat_distinct(text)
+(
+ SFUNC = ora_distinct_string_agg_transfn,
+ STYPE = internal,
+ finalfunc = ora_distinct_string_agg_finalfn
+);
+
+CREATE AGGREGATE dmp_concat_dup(text)
+(
+ SFUNC = ora_distinct_string_agg_transfn,
+ STYPE = internal,
+ finalfunc = ora_distinct_string_agg_finalfn
+);
+
+drop aggregate dmp_concat(text);
+drop aggregate dmp_concat_distinct(text);
+drop aggregate dmp_concat_dup(text);
+drop function ora_string_agg_transfn(internal, text);
+drop function ora_distinct_string_agg_transfn(internal, text);
+drop function ora_string_agg_finalfn(internal);
+
+
+

@@ -1,0 +1,73 @@
+hash_create
+ExecHashTableInsert
+hash_seq_search
+
+hash_search
+
+
+
+
+
+tzp = (pg_tz_cache *) hash_search(timezone_cache,
+                                    uppername,
+                                    HASH_ENTER,
+                                    NULL);
+                                                                    
+
+tzp = (pg_tz_cache *) hash_search(timezone_cache,
+                                    uppername,
+                                    HASH_FIND,
+                                    NULL);
+if (tzp)
+{
+        /* Timezone found in cache, nothing more to do */
+        return &tzp->tz;
+}
+
+
+
+
+static HTAB *timezone_cache = NULL;
+
+
+typedef struct
+{
+        /* tznameupper contains the all-upper-case name of the timezone */
+        char            tznameupper[TZ_STRLEN_MAX + 1];
+        pg_tz           tz;
+} pg_tz_cache;
+
+
+
+
+
+        if (!timezone_cache)
+                if (!init_timezone_hashtable())
+                        return NULL;
+                        
+                        
+
+
+static bool
+init_timezone_hashtable(void)
+{
+        HASHCTL         hash_ctl;
+
+        MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+
+        hash_ctl.keysize = TZ_STRLEN_MAX + 1;
+        hash_ctl.entrysize = sizeof(pg_tz_cache);
+
+        timezone_cache = hash_create("Timezones",
+                                        4,
+                                        &hash_ctl,
+                                        HASH_ELEM);
+        if (!timezone_cache)
+                return false;
+
+        return true;
+}
+
+
+void
+hash_destroy(HTAB *hashp)
