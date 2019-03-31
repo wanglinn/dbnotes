@@ -1,0 +1,173 @@
+diff --git a/src/backend/executor/nodeSort.c b/src/backend/executor/nodeSort.c
+index 9223398..3646191 100644
+--- a/src/backend/executor/nodeSort.c
++++ b/src/backend/executor/nodeSort.c
+@@ -19,7 +19,18 @@
+ #include "executor/nodeSort.h"
+ #include "miscadmin.h"
+ #include "utils/tuplesort.h"
++#ifdef ADB_GRAM_ORA
++#include "access/htup_details.h"
++#include "catalog/pg_collation.h"
++#include "catalog/pg_proc.h"
++#include "utils/builtins.h"
++#include "utils/fmgroids.h"
++#include "utils/syscache.h"
++#endif
+ 
++#ifdef ADB_GRAM_ORA
++static Oid adbGetCollateOid(char *collNameStr, char *collCollateStr);
++#endif
+ 
+ /* ----------------------------------------------------------------
+  *		ExecSort
+@@ -43,6 +54,20 @@ ExecSort(PlanState *pstate)
+ 	ScanDirection dir;
+ 	Tuplesortstate *tuplesortstate;
+ 	TupleTableSlot *slot;
++#ifdef ADB_GRAM_ORA
++	ListCell *ceil;
++	HeapTuple tuple;
++	Form_pg_proc procform;
++	TargetEntry *tle;
++	Var *var;
++	AttrNumber varattno;
++	Oid funOid = InvalidOid;
++	int funcCollid = 0;
++	bool getFunc = false;
++	char *ora_nlssort_str = "nlssort";
++	char *collNameStr = "zh_CN";
++	char *collCollateStr = "zh_CN.utf8";
++#endif
+ 
+ 	CHECK_FOR_INTERRUPTS();
+ 
+@@ -85,6 +110,71 @@ ExecSort(PlanState *pstate)
+ 		outerNode = outerPlanState(node);
+ 		tupDesc = ExecGetResultType(outerNode);
+ 
++#ifdef ADB_GRAM_ORA
++		if (plannode->numCols == 1)
++		{
++			/* check ora_nlssor function exist */
++			foreach(ceil, outerNode->plan->targetlist)
++			{
++				tle = (TargetEntry *)lfirst(ceil);
++				if (nodeTag(tle->expr) != T_FuncExpr)
++					continue;
++
++				if (tle->expr)
++					funOid = (*(FuncExpr *)(tle->expr)).funcid;
++
++				if (OidIsValid(funOid))
++				{
++					tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(funOid));
++					if (!HeapTupleIsValid(tuple))
++						ereport(ERROR,
++								(errcode(ERRCODE_UNDEFINED_FUNCTION),
++								 errmsg("function with OID %u does not exist", funOid)));
++
++					procform = (Form_pg_proc)GETSTRUCT(tuple);
++					Assert(procform);
++					if (strcasecmp(ora_nlssort_str, NameStr(procform->proname)) == 0)
++						getFunc = true;
++
++					ReleaseSysCache(tuple);
++				}
++
++				if (getFunc)
++					break;
++			}
++
++			if (getFunc)
++			{
++				funcCollid = adbGetCollateOid(collNameStr, collCollateStr);
++				if (OidIsValid(funcCollid))
++				{
++					plannode->collations[0] = funcCollid;
++					foreach(ceil, (*(FuncExpr *)tle->expr).args)
++					{
++						Node	   *arg = (Node *) lfirst(ceil);
++
++						if (IsA(arg, Var))
++						{
++							var = (Var *) arg;
++							varattno = var->varattno;
++							break;
++						}
++					}
++					plannode->sortColIdx[0] = varattno;
++				}
++			}
++		}
++
++		tuplesortstate = tuplesort_begin_heap(tupDesc,
++											  plannode->numCols,
++											  plannode->sortColIdx,
++											  plannode->sortOperators,
++											  plannode->collations,
++											  plannode->nullsFirst,
++											  work_mem,
++											  node->randomAccess);
++
++#else
+ 		tuplesortstate = tuplesort_begin_heap(tupDesc,
+ 											  plannode->numCols,
+ 											  plannode->sortColIdx,
+@@ -93,6 +183,7 @@ ExecSort(PlanState *pstate)
+ 											  plannode->nullsFirst,
+ 											  work_mem,
+ 											  node->randomAccess);
++#endif
+ 		if (node->bounded)
+ 			tuplesort_set_bound(tuplesortstate, node->bound);
+ 		node->tuplesortstate = (void *) tuplesortstate;
+@@ -339,3 +430,47 @@ ExecReScanSort(SortState *node)
+ 	else
+ 		tuplesort_rescan((Tuplesortstate *) node->tuplesortstate);
+ }
++
++#ifdef ADB_GRAM_ORA
++static Oid
++adbGetCollateOid(char *collNameStr, char *collCollateStr)
++{
++	NameData collName;
++	NameData collCollate;
++	Relation collateRel;
++	HeapTuple tuple;
++	HeapScanDesc relScan;
++	Form_pg_proc procform;
++	ScanKeyData key[2];
++	Oid result = InvalidOid;
++
++	namestrcpy(&collName, collNameStr);
++	namestrcpy(&collCollate, collCollateStr);
++
++	collateRel = heap_open(CollationRelationId, AccessShareLock);
++	ScanKeyInit(&key[0],
++		Anum_pg_collation_collname
++		,BTEqualStrategyNumber
++		,F_NAMEEQ
++		,NameGetDatum(&collName));
++	ScanKeyInit(&key[1],
++		Anum_pg_collation_collcollate
++		,BTEqualStrategyNumber
++		,F_NAMEEQ
++		,NameGetDatum(&collCollate));
++	relScan = heap_beginscan_catalog(collateRel, 2, key);
++	while((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
++	{
++		procform = (Form_pg_proc)GETSTRUCT(tuple);
++		Assert(procform);
++
++		result = HeapTupleGetOid(tuple);
++		break;
++	}
++	heap_endscan(relScan);
++	heap_close(collateRel, AccessShareLock);
++
++	return result;
++}
++
++#endif
+\ No newline at end of file
