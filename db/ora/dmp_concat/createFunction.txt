@@ -68,4 +68,16 @@ drop function ora_distinct_string_agg_transfn(internal, text);
 drop function ora_string_agg_finalfn(internal);
 
 
+参考：
+http://www.postgres.cn/docs/10/sql-createaggregate.html
 
+https://www.postgresql.org/docs/10/xaggr.html
+
+函数 strtok_r
+https://blog.csdn.net/huguangshanse00/article/details/51440860
+
+Postgresql源码中的动态Hash(hash_search)调用方法详解 
+http://blog.sina.com.cn/s/blog_4868f9860102wzc6.html
+
+postgres 自定义函数
+https://blog.csdn.net/huguangshanse00/article/details/39252073
