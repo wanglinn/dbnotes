@@ -1,0 +1,131 @@
+diff --git a/src/backend/parser/parse_expr.c b/src/backend/parser/parse_expr.c
+index 868c0f4..1bad70b 100644
+--- a/src/backend/parser/parse_expr.c
++++ b/src/backend/parser/parse_expr.c
+@@ -47,6 +47,9 @@
+ #include "utils/fmgroids.h"
+ #endif
+ #ifdef ADB_GRAM_ORA
++#include "access/htup_details.h"
++#include "catalog/pg_collation.h"
++#include "catalog/pg_proc.h"
+ #include "nodes/nodes.h"
+ #include "oraschema/oracoerce.h"
+ #include "parser/parse_cte.h"
+@@ -149,6 +152,7 @@ static void emit_precedence_warnings(ParseState *pstate,
+ #ifdef ADB_GRAM_ORA
+ static void ora_select_common_type(ParseState *pstate,
+ 								   List *exprs, Oid *typoid, int32 *typmod);
++static Oid oraGetCollateOid(char *collNameStr, char *collCollateStr);
+ #endif
+ 
+ /*
+@@ -1781,6 +1785,14 @@ transformFuncCall(ParseState *pstate, FuncCall *fn)
+ 	List	   *targs;
+ 	ListCell   *args;
+ #ifdef ADB_GRAM_ORA
++	bool	   hasExec = false;
++	bool	   modifyCollate = false;
++	Oid	       funcCollateOid = InvalidOid;
++	char	   *nlssortFuncName = "nlssort";
++	char	   *collNameStr = "zh_CN";
++	char	   *collCollateStr = "zh_CN.utf8";
++	Value	   *funcNameNode;
++	Node	   *targNode;
+ 	Node	   *result;
+ 	OraCoercionContext oldContext = ORA_COERCE_DEFAULT;
+ 
+@@ -1813,6 +1825,18 @@ transformFuncCall(ParseState *pstate, FuncCall *fn)
+ 		}
+ 	}
+ 
++	/* check the nlssort function */
++	if (pstate->p_grammar == PARSE_GRAM_ORACLE && list_length(fn->args)== 2
++		&&(list_length(fn->funcname) == 1 || list_length(fn->funcname) == 2))
++	{
++		funcNameNode = list_length(fn->funcname) == 1 ? (Value *)linitial(fn->funcname)
++			: (Value *)lsecond(fn->funcname);
++		if (strcasecmp(funcNameNode->val.str, nlssortFuncName) == 0)
++		{
++			modifyCollate = true;
++		}
++	}
++
+ 	PG_TRY();
+ 	{
+ #endif
+@@ -1821,8 +1845,26 @@ transformFuncCall(ParseState *pstate, FuncCall *fn)
+ 	targs = NIL;
+ 	foreach(args, fn->args)
+ 	{
++#ifdef ADB_GRAM_ORA
++		targNode = transformExprRecurse(pstate,(Node *) lfirst(args));
++		if (pstate->p_grammar == PARSE_GRAM_ORACLE && modifyCollate && (!hasExec))
++		{
++			if (IsA(targNode, Var))
++			{
++				funcCollateOid = oraGetCollateOid(collNameStr, collCollateStr);
++				if (!OidIsValid(funcCollateOid))
++					ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT)
++						, errmsg("cannot find the tuple which \"collname=%s and collcollate = %s\" in pg_collation"
++						, collNameStr, collCollateStr)));
++				((Var *)targNode)->varcollid = funcCollateOid;
++				hasExec = true;
++			}
++		}
++		targs = lappend(targs, targNode);
++#else
+ 		targs = lappend(targs, transformExprRecurse(pstate,
+ 													(Node *) lfirst(args)));
++#endif
+ 	}
+ 
+ 	/*
+@@ -4211,3 +4253,46 @@ ParseExprKindName(ParseExprKind exprKind)
+ 	}
+ 	return "unrecognized expression kind";
+ }
++
++#ifdef ADB_GRAM_ORA
++static Oid
++oraGetCollateOid(char *collNameStr, char *collCollateStr)
++{
++	NameData collName;
++	NameData collCollate;
++	Relation collateRel;
++	HeapTuple tuple;
++	HeapScanDesc relScan;
++	Form_pg_proc procform;
++	ScanKeyData key[2];
++	Oid result = InvalidOid;
++
++	namestrcpy(&collName, collNameStr);
++	namestrcpy(&collCollate, collCollateStr);
++
++	collateRel = heap_open(CollationRelationId, AccessShareLock);
++	ScanKeyInit(&key[0],
++		Anum_pg_collation_collname
++		,BTEqualStrategyNumber
++		,F_NAMEEQ
++		,NameGetDatum(&collName));
++	ScanKeyInit(&key[1],
++		Anum_pg_collation_collcollate
++		,BTEqualStrategyNumber
++		,F_NAMEEQ
++		,NameGetDatum(&collCollate));
++	relScan = heap_beginscan_catalog(collateRel, 2, key);
++	while((tuple = heap_getnext(relScan, ForwardScanDirection)) != NULL)
++	{
++		procform = (Form_pg_proc)GETSTRUCT(tuple);
++		Assert(procform);
++
++		result = HeapTupleGetOid(tuple);
++		break;
++	}
++	heap_endscan(relScan);
++	heap_close(collateRel, AccessShareLock);
++
++	return result;
++}
++#endif
+\ No newline at end of file
