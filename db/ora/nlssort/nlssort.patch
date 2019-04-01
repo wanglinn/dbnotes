@@ -1,5 +1,5 @@
 diff --git a/src/backend/executor/nodeSort.c b/src/backend/executor/nodeSort.c
-index 9223398..3646191 100644
+index 9223398..8d7163e 100644
 --- a/src/backend/executor/nodeSort.c
 +++ b/src/backend/executor/nodeSort.c
 @@ -19,7 +19,18 @@
@@ -21,7 +21,7 @@ index 9223398..3646191 100644
  
  /* ----------------------------------------------------------------
   *		ExecSort
-@@ -43,6 +54,20 @@ ExecSort(PlanState *pstate)
+@@ -43,6 +54,22 @@ ExecSort(PlanState *pstate)
  	ScanDirection dir;
  	Tuplesortstate *tuplesortstate;
  	TupleTableSlot *slot;
@@ -31,10 +31,12 @@ index 9223398..3646191 100644
 +	Form_pg_proc procform;
 +	TargetEntry *tle;
 +	Var *var;
-+	AttrNumber varattno;
++	AttrNumber origVarattno = -1;
++	AttrNumber varattno = -1;
 +	Oid funOid = InvalidOid;
 +	int funcCollid = 0;
 +	bool getFunc = false;
++	bool getAttno = false;
 +	char *ora_nlssort_str = "nlssort";
 +	char *collNameStr = "zh_CN";
 +	char *collCollateStr = "zh_CN.utf8";
@@ -42,7 +44,7 @@ index 9223398..3646191 100644
  
  	CHECK_FOR_INTERRUPTS();
  
-@@ -85,6 +110,71 @@ ExecSort(PlanState *pstate)
+@@ -85,6 +112,112 @@ ExecSort(PlanState *pstate)
  		outerNode = outerPlanState(node);
  		tupDesc = ExecGetResultType(outerNode);
  
@@ -58,6 +60,8 @@ index 9223398..3646191 100644
 +
 +				if (tle->expr)
 +					funOid = (*(FuncExpr *)(tle->expr)).funcid;
++				else
++					continue;
 +
 +				if (OidIsValid(funOid))
 +				{
@@ -73,6 +77,7 @@ index 9223398..3646191 100644
 +						getFunc = true;
 +
 +					ReleaseSysCache(tuple);
++					varattno = tle->resno;
 +				}
 +
 +				if (getFunc)
@@ -84,45 +89,75 @@ index 9223398..3646191 100644
 +				funcCollid = adbGetCollateOid(collNameStr, collCollateStr);
 +				if (OidIsValid(funcCollid))
 +				{
-+					plannode->collations[0] = funcCollid;
 +					foreach(ceil, (*(FuncExpr *)tle->expr).args)
 +					{
-+						Node	   *arg = (Node *) lfirst(ceil);
++						Node *arg = (Node *) lfirst(ceil);
 +
 +						if (IsA(arg, Var))
 +						{
 +							var = (Var *) arg;
-+							varattno = var->varattno;
++							origVarattno = var->varattno;
++							getAttno = true;
 +							break;
 +						}
++						else if (IsA(arg, RelabelType))
++						{
++							if (IsA(((RelabelType *)arg)->arg, Var))
++							{
++								var = (Var *)(((RelabelType *)arg)->arg);
++								origVarattno = var->varattno;
++								getAttno = true;
++								break;
++							}
++						}
++						else if (IsA(arg, FuncExpr))
++						{
++							if (IsA(((FuncExpr *)arg)->args, List))
++							{
++								List *listArgs = ((FuncExpr *)arg)->args;
++								ListCell *cell;
++								void *point;
++								if (list_length(listArgs) == 1)
++								{
++									cell = list_head(listArgs);
++									point = cell->data.ptr_value;
++									if (IsA(point, Var))
++									{
++										var = (Var *) point;
++										origVarattno = var->varattno;
++										getAttno = true;
++										break;
++									}
++								}
++							}
++						}
 +					}
-+					plannode->sortColIdx[0] = varattno;
++
++					if (getAttno)
++					{
++						foreach(ceil, outerNode->plan->targetlist)
++						{
++							tle = (TargetEntry *)lfirst(ceil);
++							if (tle->resorigcol == origVarattno)
++							{
++								varattno = tle->resno;
++								break;
++							}
++						}
++
++						plannode->collations[0] = funcCollid;
++						plannode->sortColIdx[0] = varattno;
++
++					}
 +				}
 +			}
 +		}
 +
-+		tuplesortstate = tuplesort_begin_heap(tupDesc,
-+											  plannode->numCols,
-+											  plannode->sortColIdx,
-+											  plannode->sortOperators,
-+											  plannode->collations,
-+											  plannode->nullsFirst,
-+											  work_mem,
-+											  node->randomAccess);
-+
-+#else
++#endif
  		tuplesortstate = tuplesort_begin_heap(tupDesc,
  											  plannode->numCols,
  											  plannode->sortColIdx,
-@@ -93,6 +183,7 @@ ExecSort(PlanState *pstate)
- 											  plannode->nullsFirst,
- 											  work_mem,
- 											  node->randomAccess);
-+#endif
- 		if (node->bounded)
- 			tuplesort_set_bound(tuplesortstate, node->bound);
- 		node->tuplesortstate = (void *) tuplesortstate;
-@@ -339,3 +430,47 @@ ExecReScanSort(SortState *node)
+@@ -339,3 +472,47 @@ ExecReScanSort(SortState *node)
  	else
  		tuplesort_rescan((Tuplesortstate *) node->tuplesortstate);
  }
