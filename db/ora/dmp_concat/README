@@ -1,0 +1,11 @@
+文件 dmp_concat.c 主要作用是定义了用来服务aggregate 的 dmp_concat, dmp_concat_distinct, dmp_concat_dup 的函数
+：ora_string_agg_transfn, ora_string_agg_finalfn
+  ora_distinct_string_agg_transfn, ora_distinct_string_agg_finalfn
+说明：dmp_concat(colname) 等同于 string_agg(colname, ',')
+     dmp_concat_distinct(colname) 等同于 string_agg(distinct colname, ',')
+	 dmp_concat_dup 同 dmp_concat_distinct 是一样的
+
+make  会生成dmp_concat.so文件
+将该dmp_concat.so 文件cp 到 $libdir 文件夹下($libdir 即 pg_config --pkglibdir 指向的路径)，
+然后执行create 操作
+

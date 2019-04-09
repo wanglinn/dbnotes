@@ -1,0 +1,5 @@
+# dmp_concat extension
+comment = 'dmp concat wrapper for string concat'
+default_version = '1.0'
+module_pathname = '$libdir/dmp_concat'
+relocatable = true
