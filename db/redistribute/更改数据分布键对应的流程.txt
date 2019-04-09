@@ -1,0 +1,101 @@
+
+
+更改数据分布键对应的流程
+
+ATController 函数下
+入参：
+AlterTableStmt *parsetree,
+cmds
+
+(gdb) p *(AlterTableCmd *)cmds->head->data->ptr_value
+$6 = {type = T_AlterTableCmd, subtype = AT_DistributeBy, name = 0x0, newowner = 0x0, def = 0x1df3bd0, behavior = DROP_RESTRICT,
+  missing_ok = 0 '\000'}
+
+
+ATController : parsetree, cmds
+-> 遍历 cmds
+			： 1. 检查其元素（AlterTableCmd 类型） 是否 满足 一些前提条件 对应函数 ATCheckCmd(Relation rel, AlterTableCmd *cmd)
+			： 2. 	对其元素做前期处理，函数 ATPrepCmd(List **wqueue, Relation rel, AlterTableCmd *cmd,
+		 				bool recurse, bool recursing, LOCKMODE lockmode)
+				 	在函数ATPrepCmd 中的 ATGetQueueEntry(List **wqueue, Relation rel) ， 将 表信息填充到 wqueue 
+					 	（以 AlteredTableInfo 结构体类型的元素）
+					根据 cmd->subtype 类型做一些检查
+					获取该元素对应的alter tabe de几种操作类型，如 AT_PASS_DROP （对应alter table xx add column 类似这样的操作对象），
+						保存起来 tab->subcmds[pass] = lappend(tab->subcmds[pass], cmd)
+
+此时 wqueue 中边保存了 以 AlteredTableInfo 结构体为元素的操作内容链表
+
+判读 tab->subcmds[x] 中是否只有list_length(tab->subcmds[AT_PASS_DISTRIB]) > 0
+
+SetSendCommandId(true)
+
+对 RedistribState 类型变量 redistribState 赋值 
+		redistribState = BuildRedistribCommands(RelationGetRelid(rel), tab->subcmds[AT_PASS_DISTRIB]);
+		在函数 BuildRedistribCommands 中， 获取新表 的 newLocInfo
+			在其调用的函数 PGXCRedistribCreateCommandList 中，进行复制表与distribute 表处理， 及对元素填充：
+				distribState->commands 填充（ RedistribCommand  结构）：
+											makeRedistribCommand(DISTRIB_COPY_TO, CATALOG_UPDATE_BEFORE, NULL)
+											makeRedistribCommand(DISTRIB_TRUNCATE, CATALOG_UPDATE_BEFORE, execNodes)
+											makeRedistribCommand(DISTRIB_COPY_FROM, CATALOG_UPDATE_AFTER, execNodes)
+											makeRedistribCommand(DISTRIB_REINDEX, CATALOG_UPDATE_AFTER, NULL)
+
+		见函数 pgxc_redist_build_replicate
+			->	pgxc_redist_build_entry
+			->	PGXCRedistribCreateCommandList
+			->	BuildRedistribCommands
+
+		到此，redistribState 结构体的变量 commands 已经填充完了。
+		对原表索引的处理
+
+PGXCRedistribTable 函数， 开始处理 CATALOG_UPDATE_BEFORE 的对象
+		在函数 distrib_execute_command 中执行了函数 distrib_copy_to
+
+更新系统表， ATRewriteCatalogs
+
+判断是否需要 need_rebuid_locator， 若是，则做缓存刷新操作
+
+PGXCRedistribTable 函数，开始处理 CATALOG_UPDATE_AFTER 的对象
+		在函数 distrib_execute_command 中调用 distrib_copy_from
+					GetCurrentCommandId(true);
+					CommandCounterIncrement()
+
+释放结构体redistribState， FreeRedistribState 函数
+
+
+scan/rewrite tables as needed ， 调用函数 ATRewriteTables
+
+
+对辅助表的处理函数 RegisterPostAlterTableAction
+
+
+
+----
+/* Create tuplestore storage */
+store = tuplestore_begin_heap(true, false, work_mem);
+
+tuplestore_end(tstore)
+
+还需要 tupleDesc
+
+ RelationGetDescr(matviewRel)
+
+ 物理文件互换  refresh_by_heap_swap
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

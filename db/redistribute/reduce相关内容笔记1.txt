@@ -1,0 +1,227 @@
+reduce相关内容笔记1
+
+定义的REMOTE_KEY_...相关内容：
+
+REMOTE_KEY_ACTIVE_SNAPSHOT
+REMOTE_KEY_ALTER_NODE   --- alter node nodename with(...) on (nodename,...)
+REMOTE_KEY_CMD_INFO     -- 更新 matview 用到
+REMOTE_KEY_COORD_INFO
+REMOTE_KEY_CUSTOM_FUNCTION
+REMOTE_KEY_END
+REMOTE_KEY_ES_INSTRUMENT
+REMOTE_KEY_GLOBAL_SNAPSHOT
+REMOTE_KEY_HEAP_SCAN_INFO
+REMOTE_KEY_NODE_OID
+REMOTE_KEY_PARAM
+REMOTE_KEY_PLAN_STMT     -- 发送plan stmt 用到
+REMOTE_KEY_REDUCE_GROUP
+REMOTE_KEY_REDUCE_INFO
+REMOTE_KEY_REMOVE_NODE    -- drop node nodename on (nodename, ...)
+REMOTE_KEY_RTE_LIST
+REMOTE_KEY_TRANSACTION_STATE
+REMOTE_KEY_VACUUM_INFO
+
+
+typedef void (*ClusterCustom_function)(StringInfo mem_toc);
+#define ClusterTocSetCustomFun(toc, fun) ClusterTocSetCustomFunStr(toc, #fun)
+
+
+--- REMOTE_KEY_CMD_INFO ---
+
+函数写入 
+static ObjectAddress
+ExecRefreshMatView_adb(RefreshMatViewStmt *stmt, const char *queryString,
+					   ParamListInfo params, char *completionTag, bool master)
+
+	initStringInfo(&toc);
+	
+	ClusterTocSetCustomFun(&toc, ClusterRefreshMatView);
+
+	begin_mem_toc_insert(&toc, REMOTE_KEY_CMD_INFO);
+	saveNode(&toc, (Node*)stmt);
+	save_node_string(&toc, queryString);
+	save_node_string(&toc, completionTag);
+	SaveParamList(&toc, params);
+	end_mem_toc_insert(&toc, REMOTE_KEY_CMD_INFO);
+
+	connList = ExecClusterCustomFunction(oidList, &toc, 0);
+
+函数读取
+void ClusterRefreshMatView(StringInfo mem_toc)
+
+
+	StringInfoData		buf;
+	buf.data = mem_toc_lookup(mem_toc, REMOTE_KEY_CMD_INFO, &buf.maxlen);
+	if (buf.data == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("Can not found cluster refresh materialized view message")));
+	}
+	buf.len = buf.maxlen;
+	buf.cursor = 0;
+
+	stmt = (RefreshMatViewStmt*)loadNode(&buf);
+	if (stmt == NULL ||
+		!IsA(stmt, RefreshMatViewStmt))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("Can not found RefreshMatViewStmt struct")));
+	}
+	queryString = load_node_string(&buf, false);
+	completionTag = load_node_string(&buf, true);
+	params = LoadParamList(&buf);
+
+
+--- REMOTE_KEY_ALTER_NODE ---
+
+函数写入
+void PgxcNodeAlter(AlterNodeStmt *stmt)
+
+	StringInfoData msg;
+	initStringInfo(&msg);
+
+	ClusterTocSetCustomFun(&msg, ClusterNodeAlter);
+
+	begin_mem_toc_insert(&msg, REMOTE_KEY_ALTER_NODE);
+	saveNode(&msg, (Node*)stmt);
+	end_mem_toc_insert(&msg, REMOTE_KEY_ALTER_NODE);
+
+	remoteList = ExecClusterCustomFunction(nodeOids, &msg, 0);
+
+函数读取
+void ClusterNodeAlter(StringInfo mem_toc)
+
+	StringInfoData buf;
+	buf.data = mem_toc_lookup(mem_toc, REMOTE_KEY_ALTER_NODE, &buf.maxlen);
+	buf.len = buf.maxlen;
+	buf.cursor = 0;
+	stmt = castNode(AlterNodeStmt, loadNode(&buf));
+
+
+--- REMOTE_KEY_CUSTOM_FUNCTION ---
+
+函数写入
+void ClusterTocSetCustomFunStr(StringInfo mem_toc, const char *proc)
+{
+	begin_mem_toc_insert(mem_toc, REMOTE_KEY_CUSTOM_FUNCTION);
+	appendStringInfoString(mem_toc, proc);
+	appendStringInfoChar(mem_toc, '\0');
+	end_mem_toc_insert(mem_toc, REMOTE_KEY_CUSTOM_FUNCTION);
+}
+
+函数读取
+static const ClusterCustomExecInfo* find_custom_func_info(StringInfo mem_toc, bool noError)
+
+	const char *str = mem_toc_lookup(mem_toc, REMOTE_KEY_CUSTOM_FUNCTION, NULL);
+	for(i=0;i<lengthof(cluster_custom_execute);++i)
+	{
+		if (strcmp(cluster_custom_execute[i].FuncString, str) == 0)
+			return &cluster_custom_execute[i];
+	}
+
+
+
+--- REMOTE_KEY_REDUCE_INFO ---
+
+函数写入
+List *ExecStartClusterAuxPadding(List *rnodes, Node *stmt, StringInfo mem_toc, uint32 flag)
+
+	if (flag & EXEC_CLUSTER_FLAG_NEED_REDUCE)
+	{
+		context.have_reduce = true;
+		begin_mem_toc_insert(&msg, REMOTE_KEY_REDUCE_INFO);
+		appendStringInfoChar(&msg, (char)((flag & EXEC_CLUSTER_FLAG_USE_MEM_REDUCE) ? true:false));
+		end_mem_toc_insert(&msg, REMOTE_KEY_REDUCE_INFO);
+	}
+
+函数读取
+void exec_cluster_plan(const void *splan, int length)
+
+	if ((tmp=mem_toc_lookup(&msg, REMOTE_KEY_REDUCE_INFO, NULL)) != NULL)
+	{
+		/* need reduce */
+		int rdc_listen_port;
+
+		/* Start self Reduce with rdc_id */
+		set_cluster_display("<cluster start self reduce>", false, info);
+		rdc_listen_port = StartSelfReduceLauncher(PGXCNodeOid, tmp[0] ? true:false);
+
+		/* Tell coordinator self own listen port */
+		send_rdc_listend_port(rdc_listen_port);
+
+		/* Wait for the whole Reduce connect OK */
+		set_cluster_display("<cluster start group reduce>", false, info);
+		wait_rdc_group_message();
+		DatanodeInClusterPlan = true;
+	}
+
+
+--- REMOTE_KEY_REDUCE_GROUP ---
+
+函数写入
+static void StartRemoteReduceGroup(List *conns, RdcMask *rdc_masks, int rdc_cnt)
+
+	initStringInfo(&msg);
+	begin_mem_toc_insert(&msg, REMOTE_KEY_REDUCE_GROUP);
+	appendBinaryStringInfo(&msg, (char *) &rdc_cnt, sizeof(rdc_cnt));
+	for (i = 0; i < rdc_cnt; i++)
+	{
+		host = rdc_masks[i].rdc_host;
+		name = rdc_masks[i].rdc_name;
+		port = rdc_masks[i].rdc_port;
+		rpid = rdc_masks[i].rdc_rpid;
+		Assert(host && host[0]);
+
+		/* including the terminating null byte ('\0') */
+		len = strlen(host) + 1;
+		appendBinaryStringInfo(&msg, host, len);
+		len = strlen(name) + 1;
+		appendBinaryStringInfo(&msg, name, len);
+		len = sizeof(port);
+		appendBinaryStringInfo(&msg, (char *) &port, len);
+		len = sizeof(rpid);
+		appendBinaryStringInfo(&msg, (char *) &rpid, len);
+	}
+	end_mem_toc_insert(&msg, REMOTE_KEY_REDUCE_GROUP);
+
+
+函数读取
+static void wait_rdc_group_message(void)
+
+	buf.data = mem_toc_lookup(&msg, REMOTE_KEY_REDUCE_GROUP, &(buf.len));
+	if (buf.data == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("Can not find reduce group message")));
+	buf.cursor = 0;
+	buf.maxlen = buf.len;
+
+
+
+transformCreateStmt
+
+--- REMOTE_KEY_HEAP_SCAN_INFO ---
+
+函数写入
+ExecClusterHeapScan
+
+	ClusterTocSetCustomFun(&msg, DoClusterHeapScan);
+
+	begin_mem_toc_insert(&msg, REMOTE_KEY_HEAP_SCAN_INFO);
+	save_oid_class(&msg, RelationGetRelid(rel));						/* relation */
+	appendBinaryStringInfo(&msg, (char*)&eq_attr, sizeof(eq_attr));		/* eq_attr */
+	do_datum_convert_out(&msg, array_type, PointerGetDatum(array));		/* datums */
+	save_node_bitmapset(&msg, ret_attnos);								/* ret_attnos */
+	appendStringInfoChar(&msg, (char)test_null);						/* test_null */
+	end_mem_toc_insert(&msg, REMOTE_KEY_HEAP_SCAN_INFO);
+
+	result = ExecClusterCustomFunction(rnodes, &msg, EXEC_CLUSTER_FLAG_READ_ONLY);
+
+
+
+
+
+
+

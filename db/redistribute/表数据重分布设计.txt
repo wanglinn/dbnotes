@@ -1,0 +1,170 @@
+步骤：
+
+1. 更改数据分片键
+create table t1(id1 int, id2 int) distribute by hash(id1);
+
+alter table t1 distribute by hash(id1);
+alter table t1 distribute by hash(id2);
+
+
+distribute  缩写  dist
+
+
+
+需要创建tuplestore, 定义一个key   REMOTE_KEY_BUILD_NEW_TUPLESTORE
+
+需要定义一个创建 tuplestore 函数    oid adbBuildNewTupleStore(planstate *pstate)
+
+需要将创建的信标的pstatetree 从coordinator 发送到datanode， adbRestributeNewRelationParseTree()
+
+   将涉及的节点信息 从coordiantor发送到datanode
+
+需要在 coordinator 上 启动 reduce 进程
+
+需要定义一个key, 用来让datanode 执行重分布  REMOTE_KEY_REDISTRIBUTE_ALTER_DISTRI_KEY
+
+在datanode 上执行重分布, 需要定义一个函数 adbRedistributeRelationAlterDistributeKey(oid tupleStoreOid, Oid sourceTblOid)
+
+
+
+原来表数据重分布主要过程： 在函数 distrib_execute_command 中
+
+copy to
+truncate 
+copy from
+reindex
+
+************************************************************************************************************************
+
+现在准备在copy to 阶段 改为 创建tuplestore 及 reduce 数据到 tuplestore 里
+在 copy from 阶段，改为 将tuplestore 物理文件与 原表互换
+
+
+************************************************************************************************************************
+
+--
+在文件 execCluster.c 中添加 
+ static const ClusterCustomExecInfo cluster_custom_execute[]
+ 类似
+ ,{CLUSTER_CUSTOM_EXEC_FUNC(ClusterNodeRemove)}
+
+在 src/backend/pgxc/locator/redistrib.c 文件中添加类似内容
+
+#define REMOTE_KEY_REMOVE_NODE	2
+
+及如下类似内容
+
+	remoteList = NIL;
+	if (nodeOids != NIL)
+	{
+		StringInfoData msg;
+		initStringInfo(&msg);
+
+		ClusterTocSetCustomFun(&msg, ClusterNodeRemove);
+
+		begin_mem_toc_insert(&msg, REMOTE_KEY_REMOVE_NODE);
+		saveNode(&msg, (Node*)stmt);
+		end_mem_toc_insert(&msg, REMOTE_KEY_REMOVE_NODE);
+
+		remoteList = ExecClusterCustomFunction(nodeOids, &msg, 0);
+		pfree(msg.data);
+	}
+
+	if (include_myself)
+		PgxcNodeRemoveLocal(stmt);
+
+	if (remoteList)
+	{
+		PQNListExecFinish(remoteList, NULL, &PQNDefaultHookFunctions, true);
+		list_free(remoteList);
+	}
+	list_free(nodeOids);
+}
+
+void ClusterNodeRemove(StringInfo mem_toc)
+{
+	DropNodeStmt *stmt;
+	StringInfoData buf;
+
+	buf.data = mem_toc_lookup(mem_toc, REMOTE_KEY_REMOVE_NODE, &buf.maxlen);
+	if (buf.data == NULL)
+	{
+		ereport(ERROR,
+				(errmsg("Can not found DropNodeStmt in cluster message"),
+				 errcode(ERRCODE_PROTOCOL_VIOLATION)));
+	}
+	buf.len = buf.maxlen;
+	buf.cursor = 0;
+
+	stmt = castNode(DropNodeStmt, loadNode(&buf));
+
+	PgxcNodeRemoveLocal(stmt);
+}
+
+
+
+函数 ExecPaddingAuxDataStmt：
+		begin_mem_toc_insert(&buf, AUX_REL_COPY_INFO);
+		SerializeAuxRelCopyInfo(&buf, auxcopylist);
+		end_mem_toc_insert(&buf, AUX_REL_COPY_INFO);
+
+		mnodes = list_copy(rnodes);
+		begin_mem_toc_insert(&buf, AUX_REL_MAIN_NODES);
+		if (flags & EXEC_CLUSTER_FLAG_NEED_SELF_REDUCE)
+			mnodes = lappend_oid(mnodes, PGXCNodeOid);
+		saveNode(&buf, (const Node *) mnodes);
+		end_mem_toc_insert(&buf, AUX_REL_MAIN_NODES);
+
+
+函数 static void ApplyCopyToAuxiliary(CopyState parent, List *rnodes)
+函数 ClusterCopyFromReduce
+函数 ClusterDummyCopyFromReduce
+
+函数 DoClusterCopy
+函数 static void ExecClusterCopyStmt(StringInfo buf, ClusterCoordInfo *info)
+函数 void exec_cluster_plan(const void *splan, int length)
+
+
+
+------------------------------------------------------------------------------------
+老的方式 用到的函数 
+在 ATController  函数中调用
+PGXCRedistribTable
+
+b ATController
+b PGXCRedistribTable
+
+关注这个结构体
+
+typedef struct AlterTableCmd	/* one subcommand of an ALTER TABLE */
+{
+	NodeTag		type;
+	AlterTableType subtype;		/* Type of table alteration to apply */
+	char	   *name;			/* column, constraint, or trigger to act on,
+								 * or tablespace */
+	RoleSpec   *newowner;
+	Node	   *def;			/* definition of new column, index,
+								 * constraint, or parent table */
+	DropBehavior behavior;		/* RESTRICT or CASCADE for DROP cases */
+	bool		missing_ok;		/* skip error if missing? */
+} AlterTableCmd;
+
+
+AlterTableType  --该枚举变量列出了各种redistribute
+
+(gdb) f 0
+#0  ATController (parsetree=0x1e25968, rel=0x7f35b9d4bda0, cmds=0x1e05528, recurse=1 '\001', lockmode=7)
+    at /home/wln/antdb40/src/backend/commands/tablecmds.c:3913
+
+(gdb) p *(AlterTableCmd *)parsetree->cmds->head->data->ptr_value
+$5 = {type = T_AlterTableCmd, subtype = AT_DistributeBy, name = 0x0, newowner = 0x0, def = 0x1e04c30, behavior = DROP_RESTRICT,
+  missing_ok = 0 '\000'}
+
+(gdb) p parsetree->cmds
+$6 = (List *) 0x1e05528
+(gdb) p cmds
+$7 = (List *) 0x1e05528
+
+
+
+
