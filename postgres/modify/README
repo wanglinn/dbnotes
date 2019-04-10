@@ -1,0 +1,6 @@
+enable_debug_mvcc.patch
+:: 添加了enable_debug_mvcc guc 参数，设置为on 可以查看已被删除的数据，默认off
+
+addPlan1.patch
+::参考来自：https://zhuanlan.zhihu.com/p/59452004
+对SQL查询新增了关键字 NORMALLY, NAIVELY 并新增其对应的2个plan

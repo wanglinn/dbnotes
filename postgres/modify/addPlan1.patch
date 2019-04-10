@@ -1,0 +1,390 @@
+diff --git a/src/backend/access/heap/heapam.c b/src/backend/access/heap/heapam.c
+index 07e9d24..76eef94 100644
+--- a/src/backend/access/heap/heapam.c
++++ b/src/backend/access/heap/heapam.c
+@@ -9503,3 +9503,62 @@ heap_mask(char *pagedata, BlockNumber blkno)
+ 		}
+ 	}
+ }
++
++HeapTuple
++heap_naive_getnext(HeapScanDesc scan)
++{
++	HeapTuple tuple = &(scan->rs_ctup);
++	BlockNumber page;
++	Page dp;
++	int lines;
++	ItemId lpp;
++	if (!scan->rs_inited)
++	{
++		if (scan->rs_nblocks == 0 || scan->rs_numblocks == 0)
++		{
++			return NULL;
++		}
++		page = scan->rs_startblock;
++		scan->rs_inited = true;
++	}
++	else
++	{
++		page = scan->rs_cblock + 1;
++		lines = 0;
++	}
++
++	for (;;)
++	{
++		if (page >= scan->rs_nblocks)
++		{
++			page = -1;
++			if (BufferIsValid(scan->rs_cbuf))
++			{
++				ReleaseBuffer(scan->rs_cbuf);
++			}
++			scan->rs_cbuf = InvalidBuffer;
++			scan->rs_cblock = InvalidBlockNumber;
++			tuple->t_data = NULL;
++			scan->rs_inited = false;
++			return NULL;
++		}
++		heapgetpage(scan, page);
++		dp = BufferGetPage(scan->rs_cbuf);
++		TestForOldSnapshot(scan->rs_snapshot, scan->rs_rd, dp);
++		lines = scan->rs_ntuples;
++		if (lines > 0)
++		{
++			lpp = PageGetItemId(dp, 1);
++			Assert(ItemIdIsNormal(lpp));
++			tuple->t_data = (HeapTupleHeader) PageGetItem((Page) dp, lpp);
++			tuple->t_len = ItemIdGetLength(lpp);
++			return &(scan->rs_ctup);
++		}
++		else
++		{
++			page++;
++			continue;
++		}
++	}
++	return NULL;
++}
+diff --git a/src/backend/executor/nodeSeqscan.c b/src/backend/executor/nodeSeqscan.c
+index c7849de..abfb4d1 100644
+--- a/src/backend/executor/nodeSeqscan.c
++++ b/src/backend/executor/nodeSeqscan.c
+@@ -33,6 +33,7 @@
+ #include "utils/rel.h"
+ 
+ static TupleTableSlot *SeqNext(SeqScanState *node);
++static TupleTableSlot * NaiveNext(NaiveScanState *node);
+ 
+ /* ----------------------------------------------------------------
+  *						Scan Support
+@@ -335,3 +336,35 @@ ExecSeqScanInitializeWorker(SeqScanState *node,
+ 	node->ss.ss_currentScanDesc =
+ 		heap_beginscan_parallel(node->ss.ss_currentRelation, pscan);
+ }
++
++static TupleTableSlot *
++NaiveNext(NaiveScanState *node)
++{
++	HeapTuple tuple;
++	HeapScanDesc scandesc;
++	EState *estate;
++	TupleTableSlot *slot;
++
++	scandesc = node->ss.ss_currentScanDesc;
++	estate = node->ss.ps.state;
++	slot = node->ss.ss_ScanTupleSlot;
++	if (scandesc == NULL)
++	{
++		scandesc = heap_beginscan(node->ss.ss_currentRelation,
++		                          estate->es_snapshot,
++								  0, NULL);
++		node->ss.ss_currentScanDesc = scandesc;
++	}
++	tuple = heap_naive_getnext(scandesc);
++
++	if (tuple)
++		ExecStoreTuple(tuple,	/* tuple to store */
++					   slot,	/* slot to store in */
++					   scandesc->rs_cbuf,	/* buffer associated with this
++											 * tuple */
++					   false);	/* don't pfree this pointer */
++	else
++		ExecClearTuple(slot);
++
++	return slot;
++}
+diff --git a/src/backend/optimizer/plan/createplan.c b/src/backend/optimizer/plan/createplan.c
+index ae51c0e..33b96bc 100644
+--- a/src/backend/optimizer/plan/createplan.c
++++ b/src/backend/optimizer/plan/createplan.c
+@@ -285,6 +285,9 @@ static ModifyTable *make_modifytable(PlannerInfo *root,
+ static GatherMerge *create_gather_merge_plan(PlannerInfo *root,
+ 						 GatherMergePath *best_path);
+ 
++static NaiveScan * make_naivescan(List *qptlist, List *qpqual, Index scanrelid);
++
++static NaiveScan * create_naivescan_plan(PlannerInfo *root, Path *best_path, List *tlist, List *scan_clauses);
+ 
+ /*
+  * create_plan
+@@ -713,7 +716,11 @@ create_scan_plan(PlannerInfo *root, Path *best_path, int flags)
+ 												   tlist,
+ 												   scan_clauses);
+ 			break;
+-
++		case T_NaiveScan:
++			plan = (Plan *)create_naivescan_plan(root,
++									best_path,
++									tlist,
++									scan_clauses);
+ 		default:
+ 			elog(ERROR, "unrecognized node type: %d",
+ 				 (int) best_path->pathtype);
+@@ -6562,3 +6569,49 @@ is_projection_capable_plan(Plan *plan)
+ 	}
+ 	return true;
+ }
++
++static NaiveScan *
++make_naivescan(List *qptlist,
++			 List *qpqual,
++			 Index scanrelid)
++{
++	NaiveScan *node = makeNode(NaiveScan);
++	Plan *plan = &node->scan.plan;
++
++	plan->targetlist = qptlist;
++	plan->qual = qpqual;
++	plan->lefttree = NULL;
++	plan->righttree = NULL;
++	node->scan.scanrelid = scanrelid;
++	return node;
++
++}
++
++static NaiveScan *
++create_naivescan_plan(PlannerInfo *root, Path *best_path,
++					  List *tlist, List *scan_clauses)
++{
++	NaiveScan *scan_plan;
++	Index scan_relid = best_path->parent->relid;
++	Assert(scan_relid > 0);
++	Assert(best_path->parent->rtekind == RTE_RELATION);
++
++	/* Sort clauses into best execution order */
++	scan_clauses = order_qual_clauses(root, scan_clauses);
++
++	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
++	scan_clauses = extract_actual_clauses(scan_clauses, false);
++
++	/* Replace any outer-relation variables with nestloop params */
++	if (best_path->param_info)
++	{
++		scan_clauses = (List *)
++			replace_nestloop_params(root, (Node *) scan_clauses);
++	}
++
++	scan_plan = make_naivescan(tlist,
++							   scan_clauses,
++							   scan_relid);
++	copy_generic_path_info(&scan_plan->scan.plan, best_path);
++	return scan_plan;
++}
+diff --git a/src/backend/optimizer/plan/planner.c b/src/backend/optimizer/plan/planner.c
+index 94b962b..b079939 100644
+--- a/src/backend/optimizer/plan/planner.c
++++ b/src/backend/optimizer/plan/planner.c
+@@ -604,6 +604,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
+ 
+ 	/* Create a PlannerInfo data structure for this subquery */
+ 	root = makeNode(PlannerInfo);
++	root->is_naive = parse->is_naive;
+ 	root->parse = parse;
+ 	root->glob = glob;
+ 	root->query_level = parent_root ? parent_root->query_level + 1 : 1;
+diff --git a/src/backend/parser/gram.y b/src/backend/parser/gram.y
+index bc65319..3f4b1c9 100644
+--- a/src/backend/parser/gram.y
++++ b/src/backend/parser/gram.y
+@@ -584,6 +584,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
+ %type <node>		partbound_datum PartitionRangeDatum
+ %type <list>		hash_partbound partbound_datum_list range_datum_list
+ %type <defelt>		hash_partbound_elem
++%type <boolean> naive_opt
+ 
+ /*
+  * Non-keyword token types.  These are hard-wired into the "flex" lexer.
+@@ -698,6 +699,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
+ 	YEAR_P YES_P
+ 
+ 	ZONE
++	NAIVELY NORMALLY
+ 
+ /*
+  * The grammar thinks these are keywords, but they are not in the kwlist.h
+@@ -11317,18 +11319,19 @@ select_clause:
+  * However, this is not checked by the grammar; parse analysis must check it.
+  */
+ simple_select:
+-			SELECT opt_all_clause opt_target_list
++			SELECT naive_opt opt_all_clause opt_target_list
+ 			into_clause from_clause where_clause
+ 			group_clause having_clause window_clause
+ 				{
+ 					SelectStmt *n = makeNode(SelectStmt);
+-					n->targetList = $3;
+-					n->intoClause = $4;
+-					n->fromClause = $5;
+-					n->whereClause = $6;
+-					n->groupClause = $7;
+-					n->havingClause = $8;
+-					n->windowClause = $9;
++					n->targetList = $4;
++					n->intoClause = $5;
++					n->fromClause = $6;
++					n->whereClause = $7;
++					n->groupClause = $8;
++					n->havingClause = $9;
++					n->windowClause = $10;
++					n->is_naive = $2;
+ 					$$ = (Node *)n;
+ 				}
+ 			| SELECT distinct_clause target_list
+@@ -14998,7 +15001,11 @@ ColLabel:	IDENT									{ $$ = $1; }
+ 			| reserved_keyword						{ $$ = pstrdup($1); }
+ 		;
+ 
+-
++/* normally, naively */
++naive_opt:
++	 NAIVELY { $$ = true; }
++	| NORMALLY { $$ = false; }
++	;
+ /*
+  * Keyword category lists.  Generally, every keyword present in
+  * the Postgres grammar should appear in exactly one of these lists.
+@@ -15160,11 +15167,13 @@ unreserved_keyword:
+ 			| MODE
+ 			| MONTH_P
+ 			| MOVE
++			| NAIVELY
+ 			| NAME_P
+ 			| NAMES
+ 			| NEW
+ 			| NEXT
+ 			| NO
++			| NORMALLY
+ 			| NOTHING
+ 			| NOTIFY
+ 			| NOWAIT
+diff --git a/src/include/access/heapam.h b/src/include/access/heapam.h
+index 40e153f..ed65478 100644
+--- a/src/include/access/heapam.h
++++ b/src/include/access/heapam.h
+@@ -200,5 +200,6 @@ extern void ss_report_location(Relation rel, BlockNumber location);
+ extern BlockNumber ss_get_location(Relation rel, BlockNumber relnblocks);
+ extern void SyncScanShmemInit(void);
+ extern Size SyncScanShmemSize(void);
++extern HeapTuple heap_naive_getnext(HeapScanDesc scan);
+ 
+ #endif							/* HEAPAM_H */
+diff --git a/src/include/nodes/execnodes.h b/src/include/nodes/execnodes.h
+index 9959c9e..2459982 100644
+--- a/src/include/nodes/execnodes.h
++++ b/src/include/nodes/execnodes.h
+@@ -1232,6 +1232,12 @@ typedef struct SampleScanState
+ 	uint32		seed;			/* random seed */
+ } SampleScanState;
+ 
++typedef struct NaiveScanState
++{
++	ScanState ss;
++	bool page_retuned_tuple;
++} NaiveScanState;
++
+ /*
+  * These structs store information about index quals that don't have simple
+  * constant right-hand sides.  See comments for ExecIndexBuildScanKeys()
+diff --git a/src/include/nodes/nodes.h b/src/include/nodes/nodes.h
+index 697d3d7..e2d0abf 100644
+--- a/src/include/nodes/nodes.h
++++ b/src/include/nodes/nodes.h
+@@ -505,7 +505,9 @@ typedef enum NodeTag
+ 	T_IndexAmRoutine,			/* in access/amapi.h */
+ 	T_TsmRoutine,				/* in access/tsmapi.h */
+ 	T_ForeignKeyCacheInfo,		/* in utils/rel.h */
+-	T_CallContext				/* in nodes/parsenodes.h */
++	T_CallContext,				/* in nodes/parsenodes.h */
++	T_NaiveScan,
++	T_NaiveScanState
+ } NodeTag;
+ 
+ /*
+diff --git a/src/include/nodes/parsenodes.h b/src/include/nodes/parsenodes.h
+index 4a91d7f..fd6b9d4 100644
+--- a/src/include/nodes/parsenodes.h
++++ b/src/include/nodes/parsenodes.h
+@@ -180,6 +180,7 @@ typedef struct Query
+ 	 */
+ 	int			stmt_location;	/* start location, or -1 if unknown */
+ 	int			stmt_len;		/* length in bytes; 0 means "rest of string" */
++	bool			is_naive;
+ } Query;
+ 
+ 
+@@ -1573,6 +1574,7 @@ typedef struct SelectStmt
+ 	struct SelectStmt *larg;	/* left child */
+ 	struct SelectStmt *rarg;	/* right child */
+ 	/* Eventually add fields for CORRESPONDING spec here */
++	bool is_naive;
+ } SelectStmt;
+ 
+ 
+diff --git a/src/include/nodes/plannodes.h b/src/include/nodes/plannodes.h
+index 249aa65..5e363d5 100644
+--- a/src/include/nodes/plannodes.h
++++ b/src/include/nodes/plannodes.h
+@@ -649,6 +649,11 @@ typedef struct CustomScan
+ 	const struct CustomScanMethods *methods;
+ } CustomScan;
+ 
++typedef struct NaiveScan
++{
++	Scan scan;
++	bool is_naive;
++}NaiveScan;
+ /*
+  * ==========
+  * Join nodes
+diff --git a/src/include/nodes/relation.h b/src/include/nodes/relation.h
+index e61c1a2..7eb92f5 100644
+--- a/src/include/nodes/relation.h
++++ b/src/include/nodes/relation.h
+@@ -343,6 +343,7 @@ typedef struct PlannerInfo
+ 
+ 	/* Does this query modify any partition key columns? */
+ 	bool		partColsUpdated;
++	bool		is_naive;
+ } PlannerInfo;
+ 
+ 
+diff --git a/src/include/parser/kwlist.h b/src/include/parser/kwlist.h
+index 23db401..fa236bc 100644
+--- a/src/include/parser/kwlist.h
++++ b/src/include/parser/kwlist.h
+@@ -253,6 +253,7 @@ PG_KEYWORD("minvalue", MINVALUE, UNRESERVED_KEYWORD)
+ PG_KEYWORD("mode", MODE, UNRESERVED_KEYWORD)
+ PG_KEYWORD("month", MONTH_P, UNRESERVED_KEYWORD)
+ PG_KEYWORD("move", MOVE, UNRESERVED_KEYWORD)
++PG_KEYWORD("naively", NAIVELY, UNRESERVED_KEYWORD)
+ PG_KEYWORD("name", NAME_P, UNRESERVED_KEYWORD)
+ PG_KEYWORD("names", NAMES, UNRESERVED_KEYWORD)
+ PG_KEYWORD("national", NATIONAL, COL_NAME_KEYWORD)
+@@ -262,6 +263,7 @@ PG_KEYWORD("new", NEW, UNRESERVED_KEYWORD)
+ PG_KEYWORD("next", NEXT, UNRESERVED_KEYWORD)
+ PG_KEYWORD("no", NO, UNRESERVED_KEYWORD)
+ PG_KEYWORD("none", NONE, COL_NAME_KEYWORD)
++PG_KEYWORD("normally", NORMALLY, UNRESERVED_KEYWORD)
+ PG_KEYWORD("not", NOT, RESERVED_KEYWORD)
+ PG_KEYWORD("nothing", NOTHING, UNRESERVED_KEYWORD)
+ PG_KEYWORD("notify", NOTIFY, UNRESERVED_KEYWORD)
