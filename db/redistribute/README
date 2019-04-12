@@ -17,3 +17,7 @@ alter table t1 to node(dn1); 会发现在dn2 上的数据不能够和dn1通信�
 0412_3.patch
 shadow 表文件能够和源表表文件进行交换，数据重分布速度合理
 问题：\d 没有显示源表文件内容, 不过从pg_class 中也是看不到的
+      alter table t1 to node (dn2); 后再次执行 alter table t1 to node (dn1); 会报错
+
+0412_4.patch
+基本满足表重分布需求，可以指定任意节点
