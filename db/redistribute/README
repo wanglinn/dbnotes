@@ -1,0 +1,19 @@
+0411_1.patch
+已经可以执行reduce 数据
+问题：比如 create table t1(id int);  t1位于dn1, dn2
+alter table t1 to node(dn1); 会发现在dn2 上的数据不能够和dn1通信，出现coordinator端 hang 问题
+
+0411_2.patch
+已经可以reduce，不过未按照指定的node进行数据分布
+
+0412_1.patch
+能够reduce, 就是在函数distrib_reduce_shadow 在 coordinator 关闭连接处理时，由处理统计信息处理，但是coord 与 datanode shadow表
+名称不同，故无法更新统计信息，会报表不存在的问题
+
+0412_2.patch
+已经能够根据指定的node 执行重分布，在shadow 表中的数据是正确的
+问题：\d 会core
+
+0412_3.patch
+shadow 表文件能够和源表表文件进行交换，数据重分布速度合理
+问题：\d 没有显示源表文件内容, 不过从pg_class 中也是看不到的
