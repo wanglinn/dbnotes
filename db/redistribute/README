@@ -21,3 +21,8 @@ shadow 表文件能够和源表表文件进行交换，数据重分布速度合�
 
 0412_4.patch
 基本满足表重分布需求，可以指定任意节点
+
+0416_1.patch
+对hash/random 分布方式， to node 及hash 和 random 互换 是没问题的。
+
+对复制表to node 存在问题
