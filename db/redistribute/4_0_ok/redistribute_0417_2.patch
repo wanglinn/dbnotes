@@ -1,3 +1,16 @@
+diff --git a/src/backend/commands/tablecmds.c b/src/backend/commands/tablecmds.c
+index cb7e62c..36973d2 100644
+--- a/src/backend/commands/tablecmds.c
++++ b/src/backend/commands/tablecmds.c
+@@ -13549,7 +13549,7 @@ BuildRedistribCommands(Oid relid, List *subCmds)
+ 	redistribState->newLocInfo = CopyRelationLocInfo(newLocInfo);
+ 	redistribState->createShadowRel = false;
+ 	redistribState->canReduce = distrib_can_use_reduce(rel
+-		, redistribState->oldLocInfo, redistribState->newLocInfo);
++		, redistribState->oldLocInfo, redistribState->newLocInfo, subCmds);
+ 
+ 	/* Build the command tree for table redistribution */
+ 	PGXCRedistribCreateCommandList(redistribState, newLocInfo);
 diff --git a/src/backend/executor/execCluster.c b/src/backend/executor/execCluster.c
 index d4139cc..22bed05 100644
 --- a/src/backend/executor/execCluster.c
@@ -63,7 +76,7 @@ index d4139cc..22bed05 100644
  
  	if (ActiveSnapshotSet())
 diff --git a/src/backend/pgxc/locator/redistrib.c b/src/backend/pgxc/locator/redistrib.c
-index 34a98d0..0f7b483 100644
+index 34a98d0..39781ce 100644
 --- a/src/backend/pgxc/locator/redistrib.c
 +++ b/src/backend/pgxc/locator/redistrib.c
 @@ -1270,19 +1270,10 @@ distrib_reduce_shadow(RedistribState *distribState, RedistribCommand *command)
@@ -88,3 +101,45 @@ index 34a98d0..0f7b483 100644
  	list_free(nodeOids);
  	list_free(mnodeOids);
  	pfree(msg.data);
+@@ -1542,8 +1533,11 @@ ClusterSwapShadowSourceTable(StringInfo msg)
+ * check the table can use reduce method to redistribute the data
+ */
+ bool
+-distrib_can_use_reduce(Relation rel, RelationLocInfo *oldLocInfo, RelationLocInfo *newLocInfo)
++distrib_can_use_reduce(Relation rel, RelationLocInfo *oldLocInfo, RelationLocInfo *newLocInfo
++	, List *subCmds)
+ {
++	ListCell   *item;
++
+ 	if (!enable_cluster_plan)
+ 		return false;
+ 
+@@ -1567,6 +1561,15 @@ distrib_can_use_reduce(Relation rel, RelationLocInfo *oldLocInfo, RelationLocInf
+ 			&& newLocInfo->locatorType == LOCATOR_TYPE_REPLICATED)
+ 		return false;
+ 
++	foreach(item, subCmds)
++	{
++		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(item);
++		if (cmd->subtype != AT_DistributeBy
++			&& cmd->subtype != AT_SubCluster
++			&& cmd->subtype != AT_AddNodeList
++			&& cmd->subtype != AT_DeleteNodeList)
++			return false;
++	}
+ 	return true;
+ }
+ 
+diff --git a/src/include/pgxc/redistrib.h b/src/include/pgxc/redistrib.h
+index 79471e9..d0f2eac 100644
+--- a/src/include/pgxc/redistrib.h
++++ b/src/include/pgxc/redistrib.h
+@@ -87,7 +87,7 @@ extern void FreeRedistribCommand(RedistribCommand *command);
+ extern void ClusterCreateShadowTable(StringInfo buf);
+ extern void ClusterRedistShadowData(StringInfo msg);
+ extern void ClusterSwapShadowSourceTable(StringInfo msg);
+-extern bool distrib_can_use_reduce(Relation rel, RelationLocInfo *oldLocInfo, RelationLocInfo *newLocInfo);
++extern bool distrib_can_use_reduce(Relation rel, RelationLocInfo *oldLocInfo, RelationLocInfo *newLocInfo, List *subCmds);
+ #endif
+ 
+ #endif  /* REDISTRIB_H */
