@@ -22,21 +22,40 @@ PG_FUNCTION_INFO_V1(ora_distinct_string_agg_finalfn);
 typedef struct
 {
 	StringInfo state;
+	StringInfo stateRecord;
 	HTAB *hashtab;
 } StringHashTabData;
 
 typedef struct
 {
-	char *str;
+	long int address;
 } ConcatElemData;
 
 static int
-cmp_string(const void *a, const void *b, Size keysize)
+ora_cmp_string(const void *a, const void *b, Size keysize)
 {
-	const char *sa = (const char *)a;
-	const char *sb = (const char *)b;
+	long int adda = *(long int*)a;
+	long int addb = *(long int*)b;
+
+	const char *sa = (const char *)adda;
+	const char *sb = (const char *)addb;
 
 	return strcmp(sa, sb);
+}
+
+static uint32
+ora_string_hash(const void *key, Size keysize)
+{
+	/*
+	 * If the string exceeds keysize-1 bytes, we want to hash only that many,
+	 * because when it is copied into the hash table it will be truncated at
+	 * that length.
+	 */
+	long int address = *(long int*)key;
+	Size s_len = strlen((const char *) address);
+
+	return DatumGetUInt32(hash_any((const unsigned char *) address,
+								   (int) s_len));
 }
 
 static HTAB *
@@ -47,14 +66,15 @@ init_concat_hashtable(void)
 	int num_elem = 2056;
 
 	MemSet(&hash_ctl, 0, sizeof(hash_ctl));
-	hash_ctl.keysize = sizeof(char *);
+	hash_ctl.keysize = sizeof(long int);
 	hash_ctl.entrysize = sizeof(ConcatElemData);
-	hash_ctl.match = cmp_string;
+	hash_ctl.match = ora_cmp_string;
+	hash_ctl.hash = ora_string_hash;
 	hash_ctl.hcxt = CurrentMemoryContext;
 	hashtab = hash_create("dmp_concat table",
 						num_elem,
 						&hash_ctl,
-						HASH_ELEM |  HASH_COMPARE | HASH_CONTEXT);
+						HASH_ELEM |HASH_FUNCTION | HASH_COMPARE |HASH_CONTEXT);
 	if (!hashtab)
 			elog(ERROR, "create hash table fail");
 
@@ -71,7 +91,22 @@ dmp_concat_distinct_showdown(Datum arg)
 	if (stringHashTab != NULL)
 	{
 		hash_destroy(stringHashTab->hashtab);
+		stringHashTab->hashtab = NULL;
+
+		if (stringHashTab->stateRecord)
+		{
+			pfree(stringHashTab->stateRecord);
+			stringHashTab->stateRecord = NULL;
+		}
+
+		if (stringHashTab->state)
+		{
+			pfree(stringHashTab->state);
+			stringHashTab->state = NULL;
+		}
+
 		pfree(stringHashTab);
+		stringHashTab = NULL;
 	}
 }
 
@@ -121,6 +156,7 @@ makeAggState(FunctionCallInfo fcinfo)
 	stringHashTab->state = NULL;
 	stringHashTab->hashtab = NULL;
 	stringHashTab->state = makeStringInfo();
+	stringHashTab->stateRecord = makeStringInfo();
 	stringHashTab->hashtab = init_concat_hashtable();
 	MemoryContextSwitchTo(oldcontext);
 
@@ -142,7 +178,7 @@ appendStringInfoText(StringInfo str, const text *t)
 }
 
 static bool
-ora_find_hashtab_match_str(HTAB *hashtab, char *str)
+ora_find_hashtab_match_str(HTAB *hashtab, long int *address)
 {
 	bool find = false;
 
@@ -150,7 +186,7 @@ ora_find_hashtab_match_str(HTAB *hashtab, char *str)
 		return false;
 
 	hash_search(hashtab
-					, str
+					, address
 					, HASH_FIND
 					, &find);
 
@@ -191,7 +227,10 @@ ora_distinct_string_agg_transfn(PG_FUNCTION_ARGS)
 	StringHashTabData *stringHashTab;
 	char *str;
 	char *delimiterStr = ",";
+	char *point;
 	bool find = false;
+	int cursor = 0;
+	long int address = 0;
 
 	stringHashTab = PG_ARGISNULL(0) ? NULL : (StringHashTabData *) PG_GETARG_POINTER(0);
 
@@ -205,19 +244,26 @@ ora_distinct_string_agg_transfn(PG_FUNCTION_ARGS)
 			stringHashTab = makeAggState(fcinfo);
 		else
 		{
-			find = ora_find_hashtab_match_str(stringHashTab->hashtab, str);
+			address = (long int)&str[0];
+			find = ora_find_hashtab_match_str(stringHashTab->hashtab, &address);
 			if (!find)
-			appendStringInfoText(stringHashTab->state, cstring_to_text(delimiterStr));	/* delimiter */
+				appendStringInfoText(stringHashTab->state, cstring_to_text(delimiterStr));	/* delimiter */
 		}
 
 		if (!find)
 		{
 			ConcatElemData *element;
+			appendStringInfoText(stringHashTab->state, PG_GETARG_TEXT_PP(1));	/* value */
+			cursor = stringHashTab->stateRecord->len;
+			point = &(stringHashTab->stateRecord->data[cursor]);
+			appendStringInfoString(stringHashTab->stateRecord, str);
+			appendStringInfoCharMacro(stringHashTab->stateRecord, '\0');
+
+			address = (long int)&point[0];
 			element = (ConcatElemData *) hash_search(stringHashTab->hashtab,
-							str,
+							 &address,
 							HASH_ENTER,
 							NULL);
-			appendStringInfoText(stringHashTab->state, PG_GETARG_TEXT_PP(1));	/* value */
 		}
 	}
 
@@ -258,6 +304,13 @@ ora_distinct_string_agg_finalfn(PG_FUNCTION_ARGS)
 	{
 		hash_destroy(stringHashTab->hashtab);
 		stringHashTab->hashtab = NULL;
+
+		if (stringHashTab->stateRecord != NULL)
+		{
+			pfree(stringHashTab->stateRecord);
+			stringHashTab->stateRecord = NULL;
+		}
+
 	}
 
 	if (stringHashTab != NULL)
