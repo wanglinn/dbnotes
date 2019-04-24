@@ -300,19 +300,6 @@ ora_distinct_string_agg_finalfn(PG_FUNCTION_ARGS)
 
 	stringHashTab = PG_ARGISNULL(0) ? NULL : (StringHashTabData *) PG_GETARG_POINTER(0);
 
-	if (stringHashTab != NULL && fcinfo->context && (!IsA(fcinfo->context, AggState)))
-	{
-		hash_destroy(stringHashTab->hashtab);
-		stringHashTab->hashtab = NULL;
-
-		if (stringHashTab->stateRecord != NULL)
-		{
-			pfree(stringHashTab->stateRecord);
-			stringHashTab->stateRecord = NULL;
-		}
-
-	}
-
 	if (stringHashTab != NULL)
 		PG_RETURN_TEXT_P(cstring_to_text_with_len(stringHashTab->state->data, stringHashTab->state->len));
 	else
