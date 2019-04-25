@@ -22,7 +22,6 @@ PG_FUNCTION_INFO_V1(ora_distinct_string_agg_finalfn);
 typedef struct
 {
 	StringInfo state;
-	StringInfo stateRecord;
 	HTAB *hashtab;
 } StringHashTabData;
 
@@ -93,12 +92,6 @@ dmp_concat_distinct_showdown(Datum arg)
 		hash_destroy(stringHashTab->hashtab);
 		stringHashTab->hashtab = NULL;
 
-		if (stringHashTab->stateRecord)
-		{
-			pfree(stringHashTab->stateRecord);
-			stringHashTab->stateRecord = NULL;
-		}
-
 		if (stringHashTab->state)
 		{
 			pfree(stringHashTab->state);
@@ -156,7 +149,6 @@ makeAggState(FunctionCallInfo fcinfo)
 	stringHashTab->state = NULL;
 	stringHashTab->hashtab = NULL;
 	stringHashTab->state = makeStringInfo();
-	stringHashTab->stateRecord = makeStringInfo();
 	stringHashTab->hashtab = init_concat_hashtable();
 	MemoryContextSwitchTo(oldcontext);
 
@@ -224,12 +216,12 @@ ora_string_agg_transfn(PG_FUNCTION_ARGS)
 Datum
 ora_distinct_string_agg_transfn(PG_FUNCTION_ARGS)
 {
+	MemoryContext aggcontext;
+	MemoryContext oldcontext;
 	StringHashTabData *stringHashTab;
 	char *str;
 	char *delimiterStr = ",";
-	char *point;
 	bool find = false;
-	int cursor = 0;
 	long int address = 0;
 
 	stringHashTab = PG_ARGISNULL(0) ? NULL : (StringHashTabData *) PG_GETARG_POINTER(0);
@@ -237,6 +229,14 @@ ora_distinct_string_agg_transfn(PG_FUNCTION_ARGS)
 	/* Append the value unless null. */
 	if (!PG_ARGISNULL(1))
 	{
+		if (!AggCheckCallContext(fcinfo, &aggcontext))
+		{
+			/* cannot be called directly because of internal-type argument */
+			elog(ERROR, "ora_distinct_string_agg_transfn called in non-aggregate context");
+		}
+
+		oldcontext = MemoryContextSwitchTo(aggcontext);
+
 		str = text_to_cstring(PG_GETARG_TEXT_PP(1));
 
 		/* On the first time through, we ignore the delimiter. */
@@ -253,18 +253,16 @@ ora_distinct_string_agg_transfn(PG_FUNCTION_ARGS)
 		if (!find)
 		{
 			ConcatElemData *element;
-			appendStringInfoText(stringHashTab->state, PG_GETARG_TEXT_PP(1));	/* value */
-			cursor = stringHashTab->stateRecord->len;
-			point = &(stringHashTab->stateRecord->data[cursor]);
-			appendStringInfoString(stringHashTab->stateRecord, str);
-			appendStringInfoCharMacro(stringHashTab->stateRecord, '\0');
 
-			address = (long int)&point[0];
+			appendStringInfoText(stringHashTab->state, PG_GETARG_TEXT_PP(1));	/* value */
+			address = (long int)&str[0];
 			element = (ConcatElemData *) hash_search(stringHashTab->hashtab,
 							 &address,
 							HASH_ENTER,
 							NULL);
 		}
+
+		MemoryContextSwitchTo(oldcontext);
 	}
 
 	/*
