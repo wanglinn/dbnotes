@@ -66,6 +66,7 @@ test(PG_FUNCTION_ARGS)
 	Oid relnamespace;
 	RelationLocInfo *locInfo;
 	Oid relid;
+	Relation rel;
 
 	tabName =  PG_GETARG_CSTRING(0);
 	nameSpace = get_current_schema();
@@ -80,7 +81,8 @@ test(PG_FUNCTION_ARGS)
 	relkind = rel->rd_rel->relkind;
 	relpersistence = rel->rd_rel->relpersistence;
 	
-	
+	ereport(NOTICE, (errmsg("table %s the relkind is '%c'", tabName, relkind)));
+
 	heap_close(rel, NoLock);
 
 	PG_RETURN_BOOL(result);
