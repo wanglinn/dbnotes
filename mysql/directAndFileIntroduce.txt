@@ -1,0 +1,338 @@
+
+1. 文件目录
+2. 文件及文件夹介绍
+2.1 database
+2.2 auto.cnf
+2.3 文件 ib_buffer_pool
+2.4 文件ibdata1
+2.5 事务日志文件ib_logfilex
+2.6 临时表文件ibtmp1
+2.7 二进制日志文件mysql-bin.xxxx
+2.8 mysql.pid 文件
+
+mysql 版本 5.7.26
+
+参考
+MySQL文件目录格式及存放位置
+https://blog.csdn.net/thesnowboy_2/article/details/55253180
+
+Mysql之binlog日志说明及利用binlog日志恢复数据操作记录
+https://www.cnblogs.com/fan-yuan/p/9360224.html
+
+
+
+
+1. 文件目录
+total 254028
+-rw-r----- 1 wl wl       56 Jun 21 16:36 auto.cnf
+drwxr-x--- 2 wl wl       90 Jun 25 09:18 db1 
+-rw-r----- 1 wl wl      298 Jun 21 16:41 ib_buffer_pool
+-rw-r----- 1 wl wl 79691776 Jun 25 09:33 ibdata1
+-rw-r----- 1 wl wl 33554432 Jun 25 09:33 ib_logfile0
+-rw-r----- 1 wl wl 33554432 Jun 22 10:04 ib_logfile1
+-rw-r----- 1 wl wl 33554432 Jun 25 09:33 ib_logfile2
+-rw-r----- 1 wl wl 79691776 Jun 25 09:06 ibtmp1
+drwxr-x--- 2 wl wl     4096 Jun 21 16:36 mysql
+-rw-r----- 1 wl wl      177 Jun 21 16:36 mysql-bin.000001
+-rw-r----- 1 wl wl      154 Jun 21 16:44 mysql-bin.000002
+-rw-r----- 1 wl wl      154 Jun 21 16:51 mysql-bin.000003
+-rw-r----- 1 wl wl      398 Jun 22 08:58 mysql-bin.000004
+-rw-r----- 1 wl wl      154 Jun 22 09:00 mysql-bin.000005
+-rw-r----- 1 wl wl    11779 Jun 25 09:33 mysql-bin.000006
+-rw-r----- 1 wl wl      114 Jun 22 09:00 mysql-bin.index
+-rw-r----- 1 wl wl        5 Jun 22 09:00 mysql.pid
+drwxr-x--- 2 wl wl     8192 Jun 21 16:36 performance_schema
+drwxr-x--- 2 wl wl     8192 Jun 21 16:36 sys
+
+2. 文件及文件夹介绍
+2.1 database
+上面的文件夹db1, mysql, performance_schema, sys  都是建立的database，其中db1是用户create 的database
+
+2.2 auto.cnf
+文件内容
+[wl@host122 data5726]$ cat auto.cnf
+[auto]
+server-uuid=9a7f7862-93ff-11e9-bdde-fa163ec3ee8a
+
+实现函数见
+int flush_auto_options(const char* fname)
+
+uuid 生成对应的函数
+static int generate_server_uuid()
+char server_uuid[UUID_LENGTH+1]; --存在这里
+#define UUID_LENGTH (8+1+4+1+4+1+4+1+12)
+
+参考
+MySQL auto.cnf 文件
+https://www.jianshu.com/p/2347b1a9eacd
+
+2.3 文件 ib_buffer_pool
+在关闭MySQL时，会把内存中的热数据保存在磁盘里ib_buffer_pool文件中，位于数据目录下
+
+内容
+[wl@host122 data5726]$ head ib_buffer_pool 
+21,3
+21,2
+21,1
+21,0
+7,13
+7,12
+7,11
+7,10
+7,9
+7,8
+...
+默认62行
+
+
+参考
+mySQL5.6新特性快速预热Buffer_Pool缓冲池
+https://blog.csdn.net/rudygao/article/details/47209797
+
+2.4 文件ibdata1
+ibdata1 为共享表空间文件
+内容
+Innodb共享表空间文件ibdata1中存储了以下几部分信息:
+
+Data dictionary
+Double write buffer
+Insert buffer
+Rollback segments
+UNDO space
+Foreign key constraint system tables
+
+我们在初始化ibdata1时，最好设置大一些，这样就可以避免因为在高并发情景下导致ibdata1急剧增大，大大影响性能
+
+参考
+ibdata1共享表空间文件都包含什么内容
+https://blog.csdn.net/george_auyeung/article/details/76632879
+
+MySQL的ibdata1详解
+https://blog.csdn.net/demonson/article/details/79864225
+
+mysql关于ibdata文件的理解
+https://www.jianshu.com/p/449aa46b6a69
+
+
+2.5 事务日志文件ib_logfilex
+用于存放InnoDB引擎的事务日志信息的
+
+文件
+mysql> show variables like 'innodb_log_files_in_group';
++---------------------------+-------+
+| Variable_name             | Value |
++---------------------------+-------+
+| innodb_log_files_in_group | 3     |
++---------------------------+-------+
+1 row in set (0.00 sec)
+
+-rw-r----- 1 wl wl 33554432 Jun 25 10:28 ib_logfile0
+-rw-r----- 1 wl wl 33554432 Jun 25 10:28 ib_logfile1
+-rw-r----- 1 wl wl 33554432 Jun 25 10:28 ib_logfile2
+
+作用
+事务日志或称redo日志，在mysql中默认以ib_logfile0,ib_logfile1名称存在,可以手工修改参数，调节开启几组日志来服务于当前mysql数据库,mysql采用顺序，循环写方式，每开启一个事务时，会把一些相关信息记录事务日志中(记录对数据文件数据修改的物理位置或叫做偏移量);
+这个系列文件个数由参数innodb_log_files_in_group控制，若设置为4，则命名为ib_logfile0~3。
+这些文件的写入是顺序、循环写的，logfile0写完从logfile1继续，logfile3写完则logfile0继续。
+
+
+参考
+Mysql 事务日志(Ib_logfile)
+https://www.cnblogs.com/qianyuliang/archive/2018/11/06/9916372.html
+
+丁奇
+MySQL源码学习：InnoDB的ib_logfile写入策略
+https://yq.aliyun.com/articles/8829?hmsr=toutiao.io&utm_medium=toutiao.io&utm_source=toutiao.io
+
+mysql关于ib_logfile事务日志和binary log二进制日志的区别
+http://blog.itpub.net/30126024/viewspace-2216099/
+
+2.6 临时表文件ibtmp1
+
+
+mysql>  show variables like '%innodb_temp_data_file_path%';
++----------------------------+-----------------------+
+| Variable_name              | Value                 |
++----------------------------+-----------------------+
+| innodb_temp_data_file_path | ibtmp1:12M:autoextend |
++----------------------------+-----------------------+
+1 row in set (0.00 sec)
+
+MySQL5.7引入了临时表专用的表空间，默认命名为ibtmp1，创建的非压缩临时表都存储在该表空间中。系统重启后，ibtmp1会被重新初始化到默认12MB。你可以通过设置参数innodb_temp_data_file_path来修改ibtmp1的默认初始大小，以及是否允许autoExtent。默认值为 ”ibtmp1:12M:autoExtent“ ， 除了用户定义的非压缩临时表外，第1~32个临时表专用的回滚段也存放在该文件中（0号回滚段总是存放在ibdata中）。
+
+
+参考
+MySQL ; 引擎特性; InnoDB文件系统管理（二）
+http://www.360doc.com/content/16/0520/03/6902273_560595507.shtml
+
+mysql的ibtmp1文件
+https://www.jianshu.com/p/1fa7fb7355ae
+
+
+2.7 二进制日志文件mysql-bin.xxxx
+
+mysql-binlog是MySQL数据库的二进制日志，用于记录用户对数据库操作的SQL语句（(除了数据查询语句）信息。可以使用mysqlbin命令查看二进制日志的内容。
+
+文件
+-rw-r----- 1 wl wl      177 Jun 21 16:36 mysql-bin.000001
+-rw-r----- 1 wl wl      154 Jun 21 16:44 mysql-bin.000002
+-rw-r----- 1 wl wl      154 Jun 21 16:51 mysql-bin.000003
+-rw-r----- 1 wl wl      398 Jun 22 08:58 mysql-bin.000004
+-rw-r----- 1 wl wl      154 Jun 22 09:00 mysql-bin.000005
+-rw-r----- 1 wl wl    17299 Jun 25 10:28 mysql-bin.000006
+-rw-r----- 1 wl wl      114 Jun 22 09:00 mysql-bin.index
+
+这个文件可以直接读取
+
+[wl@host122 data5726]$ strings mysql-bin.000001
+5.7.26-log
+[wl@host122 data5726]$ strings mysql-bin.000004
+5.7.26-log
+ALTER USER 'root'@'localhost' IDENTIFIED WITH 'mysql_native_password' AS '*4ACFE3202A5FF5CF467898FC58AAB1D615029441'p%
+--
+
+mysql> show binlog events in 'mysql-bin.000001';
++------------------+-----+----------------+-----------+-------------+---------------------------------------+
+| Log_name         | Pos | Event_type     | Server_id | End_log_pos | Info                                  |
++------------------+-----+----------------+-----------+-------------+---------------------------------------+
+| mysql-bin.000001 |   4 | Format_desc    |         1 |         123 | Server ver: 5.7.26-log, Binlog ver: 4 |
+| mysql-bin.000001 | 123 | Previous_gtids |         1 |         154 |                                       |
+| mysql-bin.000001 | 154 | Stop           |         1 |         177 |                                       |
++------------------+-----+----------------+-----------+-------------+---------------------------------------+
+3 rows in set (0.00 sec)
+
+mysql> show binlog events in 'mysql-bin.000002' ;
++------------------+-----+----------------+-----------+-------------+---------------------------------------+
+| Log_name         | Pos | Event_type     | Server_id | End_log_pos | Info                                  |
++------------------+-----+----------------+-----------+-------------+---------------------------------------+
+| mysql-bin.000002 |   4 | Format_desc    |         1 |         123 | Server ver: 5.7.26-log, Binlog ver: 4 |
+| mysql-bin.000002 | 123 | Previous_gtids |         1 |         154 |                                       |
++------------------+-----+----------------+-----------+-------------+---------------------------------------+
+2 rows in set (0.00 sec)
+
+mysql> show binlog events in 'mysql-bin.000006' ;
++------------------+-------+----------------+-----------+-------------+-------------------------------------------------------------------------+
+| Log_name         | Pos   | Event_type     | Server_id | End_log_pos | Info                                                                    |
++------------------+-------+----------------+-----------+-------------+-------------------------------------------------------------------------+
+| mysql-bin.000006 |     4 | Format_desc    |         1 |         123 | Server ver: 5.7.26-log, Binlog ver: 4                                   |
+| mysql-bin.000006 |   123 | Previous_gtids |         1 |         154 |                                                                         |
+| mysql-bin.000006 |   154 | Anonymous_Gtid |         1 |         219 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |   219 | Query          |         1 |         311 | use `mysql`; flush privileges                                           |
+| mysql-bin.000006 |   311 | Anonymous_Gtid |         1 |         376 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |   376 | Query          |         1 |         468 | use `mysql`; analyze table help_topic                                   |
+| mysql-bin.000006 |   468 | Anonymous_Gtid |         1 |         533 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |   533 | Query          |         1 |         625 | use `mysql`; analyze table help_topic                                   |
+| mysql-bin.000006 |   625 | Anonymous_Gtid |         1 |         690 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |   690 | Query          |         1 |         782 | use `mysql`; analyze table help_topic                                   |
+| mysql-bin.000006 |   782 | Anonymous_Gtid |         1 |         847 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |   847 | Query          |         1 |         939 | use `mysql`; analyze table help_topic                                   |
+| mysql-bin.000006 |   939 | Anonymous_Gtid |         1 |        1004 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |  1004 | Query          |         1 |        1095 | create database db1                                                     |
+| mysql-bin.000006 |  1095 | Anonymous_Gtid |         1 |        1160 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |  1160 | Query          |         1 |        1265 | use `information_schema`; flush privileges                              |
+| mysql-bin.000006 |  1265 | Anonymous_Gtid |         1 |        1330 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |  1330 | Query          |         1 |        1425 | use `db1`; create table t1(id int)                                      |
+| mysql-bin.000006 |  1425 | Anonymous_Gtid |         1 |        1490 | SET @@SESSION.GTID_NEXT= 'ANONYMOUS'                                    |
+| mysql-bin.000006 |  1490 | Query          |         1 |        1567 | BEGIN                                                                   |
+| mysql-bin.000006 |  1567 | Query          |         1 |        1663 | use `db1`; insert into t1 values(1)         
+......
+
+[wl@host122 data5726]$ cat mysql-bin.index 
+./mysql-bin.000001
+./mysql-bin.000002
+./mysql-bin.000003
+./mysql-bin.000004
+./mysql-bin.000005
+./mysql-bin.000006
+
+
+[wl@host122 data5726]$ strings mysql-bin.000006
+5.7.26-log
+SYSTEMmysql
+flush privilegesX
+mysql
+analyze table help_topicE
+mysql
+analyze table help_topic
+mysql
+analyze table help_topic*
+mysql
+analyze table help_topic
+create database db1`
+SYSTEMinformation_schema
+flush privileges
+create table t1(id int)$
+BEGIN
+insert into t1 values(1)
+BEGIN
+insert into t1 values(1),(2)
+BEGIN
+insert into t1 values(1),(2),(3)
+BEGIN
+....
+
+显示二进制文件列表
+mysql> show binary logs;
++------------------+-----------+
+| Log_name         | File_size |
++------------------+-----------+
+| mysql-bin.000001 |       177 |
+| mysql-bin.000002 |       154 |
+| mysql-bin.000003 |       154 |
+| mysql-bin.000004 |       398 |
+| mysql-bin.000005 |       154 |
+| mysql-bin.000006 |     17299 |
++------------------+-----------+
+6 rows in set (0.00 sec)
+
+
+[wl@host122 data5726]$ mysqlbinlog mysql-bin.000001
+mysqlbinlog: [ERROR] unknown variable 'default-character-set=utf8mb4'
+[wl@host122 data5726]$ 
+[wl@host122 data5726]$ mysqlbinlog --no-defaults  mysql-bin.000001
+/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=1*/;
+/*!50003 SET @OLD_COMPLETION_TYPE=@@COMPLETION_TYPE,COMPLETION_TYPE=0*/;
+DELIMITER /*!*/;
+# at 4
+#190621 16:36:02 server id 1  end_log_pos 123 CRC32 0x268858a7  Start: binlog v 4, server v 5.7.26-log created 190621 16:36:02 at startup
+ROLLBACK/*!*/;
+BINLOG '
+8pYMXQ8BAAAAdwAAAHsAAAAAAAQANS43LjI2LWxvZwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAADylgxdEzgNAAgAEgAEBAQEEgAAXwAEGggAAAAICAgCAAAACgoKKioAEjQA
+AadYiCY=
+'/*!*/;
+# at 123
+#190621 16:36:02 server id 1  end_log_pos 154 CRC32 0x000b1e7d  Previous-GTIDs
+# [empty]
+# at 154
+#190621 16:36:03 server id 1  end_log_pos 177 CRC32 0xd9a8039e  Stop
+SET @@SESSION.GTID_NEXT= 'AUTOMATIC' /* added by mysqlbinlog */ /*!*/;
+DELIMITER ;
+# End of log file
+/*!50003 SET COMPLETION_TYPE=@OLD_COMPLETION_TYPE*/;
+/*!50530 SET @@SESSION.PSEUDO_SLAVE_MODE=0*/;
+
+参考
+MySQL - binlog日志简介及设置
+https://baijiahao.baidu.com/s?id=1613946893411582653&wfr=spider&for=pc
+
+Mysql数据库之Binlog日志使用总结(必看篇)
+https://blog.csdn.net/zhenhuax/article/details/81295412
+
+MySQL的binlog日志详解
+https://blog.csdn.net/king_kgh/article/details/74833539
+
+MySQL的binlog数据如何查看
+https://www.cnblogs.com/zhaoyang-1989/p/4824757.html
+
+2.8 mysql.pid 文件
+
+[wl@host122 data5726]$ cat mysql.pid
+3191
+[wl@host122 data5726]$ ps xuf 
+USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+wl       31080  0.0  0.1 116868  3640 pts/0    S    13:32   0:00 -bash
+wl       32328  0.0  0.0 151104  1840 pts/0    R+   13:54   0:00  \_ ps xuf
+wl       30712  0.0  0.1 116760  3408 pts/1    S    13:26   0:00 -bash
+wl       31848  0.0  0.1 133832  2584 pts/1    S+   13:46   0:00  \_ mysql -uroot -p
+wl        3191  0.0  5.6 878240 107028 ?       Sl   Jun22   1:24 mysqld --defaults-file=/home/wl/software/sysconfdir/my.cnf
