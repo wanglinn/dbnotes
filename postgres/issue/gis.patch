@@ -1,0 +1,195 @@
+diff --git a/src/backend/commands/tablecmds.c b/src/backend/commands/tablecmds.c
+index 8eec25e..02b6a92 100644
+--- src/backend/commands/tablecmds.c
++++ src/backend/commands/tablecmds.c
+@@ -735,7 +735,8 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
+ 	 *	  DISTRIBUTE BY clause is missing in the statemnet the system
+ 	 *	  should not try to find out the node list itself.
+ 	 */
+-	if ((IsCnNode() || IsDnNode() || (isRestoreMode && stmt->distributeby != NULL))
++	if ((((IsCnNode() || IsDnNode()) && stmt->distributeby != NULL)
++              || (isRestoreMode && stmt->distributeby != NULL))
+ 		&& relkind == RELKIND_RELATION
+ 		&& stmt->relation->relpersistence != RELPERSISTENCE_TEMP)
+ 	{
+diff --git a/src/backend/parser/parse_utilcmd.c b/src/backend/parser/parse_utilcmd.c
+index f57f359..8f0aa05 100644
+--- src/backend/parser/parse_utilcmd.c
++++ src/backend/parser/parse_utilcmd.c
+@@ -75,6 +75,19 @@
+ #include "utils/syscache.h"
+ #include "utils/typcache.h"
+ 
++#ifdef ADB
++/*
++ * Sources to make decision about distribution column, in order of preceedence
++ */
++typedef enum
++{
++	FBS_NONE,		/* no fallback columns */
++	FBS_COLDEF, 	/* column definition, if no constraints defined */
++	FBS_UIDX,		/* unique key definition, if no PK defined */
++	FBS_PKEY,		/* primary key definition */
++	FBS_REPLICATE	/* constraint definitions require to replicate table */
++} FallbackSrc;
++#endif
+ 
+ /* State shared by transformCreateStmt and its subroutines */
+ typedef struct
+@@ -98,6 +111,7 @@ typedef struct
+ 								 * the table */
+ 	IndexStmt  *pkey;			/* PRIMARY KEY index, if any */
+ #ifdef ADB
++	FallbackSrc fallback_source;
+ 	char	  *fallback_dist_col;	/* suggested column to distribute on */
+ 	DistributeBy	*distributeby;		/* original distribute by column of CREATE TABLE */
+ 	PGXCSubCluster	*subcluster;		/* original subcluster option of CREATE TABLE */
+@@ -274,7 +288,11 @@ addDefaultDistributeBy(CreateStmt *stmt)
+  *	  - thomas 1997-12-02
+  */
+ List *
++#ifdef ADB
++transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG(Node **transform_stmt), bool autodistribute)
++#else
+ transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG(Node **transform_stmt))
++#endif
+ {
+ 	ParseState *pstate;
+ 	CreateStmtContext cxt;
+@@ -371,6 +389,8 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG
+ #ifdef ADB
+ 	cxt.fallback_dist_col = NULL;
+ 	cxt.distributeby = stmt->distributeby;
++	cxt.fallback_source = FBS_NONE;
++	cxt.subcluster = stmt->subcluster;
+ #endif
+ 	/*
+ 	 * Notice that we allow OIDs here only for plain tables, even though
+@@ -463,6 +483,12 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG
+ 	stmt->tableElts = cxt.columns;
+ 	stmt->constraints = cxt.ckconstraints;
+ 
++#ifdef ADB
++	if (stmt->distributeby == NULL)
++		stmt->distributeby = cxt.distributeby;
++	if (stmt->subcluster == NULL)
++		stmt->subcluster = cxt.subcluster;
++#endif
+ 	result = lappend(cxt.blist, stmt);
+ 	result = list_concat(result, cxt.alist);
+ 	result = list_concat(result, save_alist);
+@@ -478,7 +504,11 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG
+ 	 * If the user did not specify any distribution clause and there is no
+ 	 * inherits clause, try and use PK or unique index
+ 	 */
+-	if (!stmt->distributeby &&
++	if (
++#ifdef ADB
++autodistribute && 
++#endif
++!stmt->distributeby &&
+ 		!stmt->inhRelations &&
+ 		stmt->relation->relpersistence != RELPERSISTENCE_TEMP &&
+ 		cxt.fallback_dist_col)
+@@ -491,7 +521,11 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG
+ 		stmt->distributeby->colname = cxt.fallback_dist_col;
+ 	}
+ 
+-	if (IsCnMaster() &&
++	if (
++#ifdef ADB
++autodistribute && 
++#endif
++IsCnMaster() &&
+ 		stmt->distributeby == NULL &&
+ 		list_length(stmt->inhRelations) == 1)
+ 	{
+@@ -3092,6 +3126,19 @@ transformColumnType(CreateStmtContext *cxt, ColumnDef *column)
+ 										column->collClause->location)));
+ 	}
+ 
++#ifdef ADB
++	/*
++	 * If the distribution is not defined yet by a priority source add it to the
++	 * list of possible fallbacks
++	 */
++	if (IS_PGXC_COORDINATOR && cxt->distributeby == NULL && !cxt->isalter &&
++			cxt->fallback_source <= FBS_COLDEF &&
++			IsTypeDistributable(HeapTupleGetOid(ctype)))
++	{
++		cxt->fallback_dist_col = pstrdup(column->colname);
++		cxt->fallback_source = FBS_COLDEF;
++	}
++#endif
+ 	ReleaseSysCache(ctype);
+ }
+ 
+diff --git a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+index 5c2a067..80def91 100644
+--- src/backend/tcop/postgres.c
++++ src/backend/tcop/postgres.c
+@@ -890,7 +890,7 @@ pg_analyze_and_rewrite_for_gram(Node *parsetree, const char *query_string,
+ 			Query *query = (Query *) lfirst(lc);
+ 
+ 			if (query->sql_statement == NULL)
+-				query->sql_statement = pstrdup(query_string);
++				query->sql_statement = query_string;
+ 		}
+ 	}
+ #endif
+@@ -1105,6 +1105,7 @@ pg_plan_queries(List *querytrees, int cursorOptions, ParamListInfo boundParams)
+ 		}
+ 
+ 		stmt_list = lappend(stmt_list, stmt);
++
+ 	}
+ 
+ 	return stmt_list;
+@@ -1848,7 +1849,7 @@ exec_parse_message(const char *query_string,	/* string to execute */
+ 				Query *query = (Query *) lfirst(lc);
+ 
+ 				if (query->sql_statement == NULL)
+-					query->sql_statement = pstrdup(query_string);
++					query->sql_statement = query_string;
+ 			}
+ 		}
+ #endif
+diff --git a/src/backend/tcop/utility.c b/src/backend/tcop/utility.c
+index 5c0e391..8250795 100644
+--- src/backend/tcop/utility.c
++++ src/backend/tcop/utility.c
+@@ -1676,11 +1676,17 @@ ProcessUtilitySlow(Node *parsetree,
+ #ifdef ADB
+ 					bool		is_temp = false;
+ 					Node	   *transformed_stmt = NULL;
++					bool		is_local = false;
+ #endif
+ 
+ 					/* Run parse analysis ... */
++#ifdef ADB
+ 					stmts = transformCreateStmt((CreateStmt *) parsetree,
+-												queryString ADB_ONLY_COMMA_ARG(&transformed_stmt));
++												queryString ADB_ONLY_COMMA_ARG(&transformed_stmt), !is_local && !sentToRemote);
++#else
++					stmts = transformCreateStmt((CreateStmt *) parsetree,queryString ADB_ONLY_COMMA_ARG(&transformed_stmt));
++#endif
++
+ #ifdef ADB
+ 					if (IsCnMaster())
+ 					{
+diff --git a/src/include/parser/parse_utilcmd.h b/src/include/parser/parse_utilcmd.h
+index e2a8353..cbe991d 100644
+--- src/include/parser/parse_utilcmd.h
++++ src/include/parser/parse_utilcmd.h
+@@ -17,7 +17,11 @@
+ #include "parser/parse_node.h"
+ 
+ 
++#ifdef ADB
++extern List *transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG(Node **transform_stmt), bool autodistribute);
++#else
+ extern List *transformCreateStmt(CreateStmt *stmt, const char *queryString ADB_ONLY_COMMA_ARG(Node **transform_stmt));
++#endif
+ extern List *transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
+ 						const char *queryString);
+ extern IndexStmt *transformIndexStmt(Oid relid, IndexStmt *stmt,

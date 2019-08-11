@@ -1,0 +1,6 @@
+psql:modify.sql:8: ERROR:  cache lookup failed for attribute 7 of relation 57344
+
+postgresql-xl 版本 
+psql (Postgres-XL) 10alpha2
+(based on PostgreSQL) 10.3 (Postgres-XL 10alpha2)
+

@@ -1,0 +1,131 @@
+转载的内容 http://forum.huawei.com/enterprise/zh/thread-4515350.html
+下面的函数及视图每次使用都需要重新建立，也就是说，若存在数据更新等操作，查看一次重新执行一次
+
+DROP FUNCTION PUBLIC.pgxc_analyzed_tuples() CASCADE;
+CREATE OR REPLACE FUNCTION PUBLIC.pgxc_analyzed_tuples
+(
+    OUT schemaname text,
+    OUT tablename text,
+    OUT dn_name text,
+    OUT tuples real
+)
+RETURNS SETOF record
+AS $$
+DECLARE
+    datanode_rd     record;
+    fetch_tuples    record;
+    fetch_dn        text;
+    fetch_tuple_str text;    
+    BEGIN
+        fetch_dn := 'SELECT node_name FROM pgxc_node WHERE node_type=''D'' order by node_name';
+        FOR datanode_rd IN EXECUTE(fetch_dn) LOOP
+            dn_name         :=  datanode_rd.node_name;
+                        RAISE INFO '% done',dn_name;
+            fetch_tuple_str := 'EXECUTE DIRECT ON (' || dn_name || ') ''SELECT 
+                                                                            n.nspname,
+                                                                            c.relname,
+                                                                            c.reltuples 
+                                                                        FROM pg_class c 
+                                                                        INNER JOIN pg_namespace n ON n.oid = c.relnamespace 
+                                                                        where  c. reltuples > 1000 and relkind = ''''r''''
+                                                                        ''';
+            FOR fetch_tuples IN EXECUTE(fetch_tuple_str) LOOP
+                tuples      :=  fetch_tuples.reltuples;
+                schemaname  :=  fetch_tuples.nspname;
+                tablename   :=  fetch_tuples.relname;
+                return next;
+            END LOOP;
+        END LOOP;
+        return;
+    END; $$
+LANGUAGE 'plpgsql';
+
+--
+CREATE VIEW PUBLIC.pgxc_analyzed_tuples 
+AS 
+WITH udt AS
+(
+    SELECT 
+        n.nspname AS schemaname,
+        c.relname AS tablename
+    FROM pg_class c
+    INNER JOIN pg_namespace n ON (n.oid = c.relnamespace)
+    WHERE c.oid IN (SELECT pcrelid FROM pgxc_class WHERE pclocatortype = 'H')
+)
+
+SELECT
+    schemaname,
+    tablename,
+    dn_name,
+    (round((tuples/total_tuples)::numeric, 4) * 100)AS ratio,
+    tuples,
+    total_tuples 
+FROM 
+(
+    SELECT 
+        t.schemaname,
+        t.tablename,
+        t.dn_name,
+        t.tuples,
+        sum(tuples) OVER (PARTITION BY t.schemaname, t.tablename) AS total_tuples
+    FROM PUBLIC.pgxc_analyzed_tuples() t
+    INNER JOIN udt u on (u.schemaname = t.schemaname and u.tablename = t.tablename) 
+) tb1
+WHERE total_tuples > 0
+ORDER BY schemaname, tablename, ratio DESC;
+
+--
+CREATE VIEW PUBLIC.pgxc_analyzed_skewness
+AS
+SELECT
+    schemaname,
+    tablename,
+    (min(ratio)::numeric(6,3)) AS ratio_min,
+    (max(ratio)::numeric(6,3) ) AS ratio_max,
+    (max(ratio) - min(ratio))::numeric(6,3) AS skewness_ratio,
+    ((max(ratio) - min(ratio)) * total_tuples / 100)::numeric(35) as skewness_tuple,
+    ((max(ratio) - min(ratio)) * relwidth * total_tuples / 100)::numeric(35) as skewness_size,
+    (stddev_samp(ratio)::numeric(6,3)) AS skewness_stddev
+FROM
+(
+    WITH udt AS
+    (
+        SELECT 
+            n.nspname AS schemaname,
+            c.relname AS tablename,
+            relwidth
+        FROM pg_class c
+        INNER JOIN pg_namespace n ON (n.oid = c.relnamespace)
+        INNER JOIN (SELECT sum(stawidth) as relwidth, starelid FROM pg_statistic GROUP BY starelid)s ON s.starelid = c.oid
+        WHERE c.oid IN (SELECT pcrelid FROM pgxc_class WHERE pclocatortype = 'H')
+    )
+
+    SELECT
+        schemaname,
+        tablename,
+        total_tuples,
+        relwidth,
+        (round((tuples/total_tuples)::numeric, 4) * 100)AS ratio
+    FROM
+    (
+        SELECT 
+            t.schemaname,
+            t.tablename,
+            t.dn_name,
+            t.tuples,
+            relwidth,
+            sum(tuples) OVER (PARTITION BY t.schemaname, t.tablename) AS total_tuples
+        FROM PUBLIC.pgxc_analyzed_tuples() t
+        INNER JOIN udt u on (u.schemaname = t.schemaname and u.tablename = t.tablename) 
+    ) tb2 
+    WHERE total_tuples > 0
+) tb1
+GROUP BY schemaname, tablename, total_tuples, relwidth;
+
+
+--使用下面的语句来查询库中的数据倾斜情况。
+SELECT * FROM PUBLIC.pgxc_analyzed_tuples;
+
+--该查询对整库的数据进行倾斜性分析，结果中包括模式、表、最小最大倾斜率、倾斜度、倾斜字段、倾斜数据量大小、倾斜度方差等信息。
+SELECT * FROM PUBLIC.pgxc_analyzed_skewness ORDER BY skewness_size;
+

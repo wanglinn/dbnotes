@@ -1,0 +1,53 @@
+表空间现状
+
+节点（coordinator/datanode）对应的表空间文件夹名: 
+格式：TABLESPACE_VERSION_DIRECTORY + ”_“ + NODENAME
+其中
+#define TABLESPACE_VERSION_DIRECTORY	"PG_" PG_MAJORVERSION "_" \
+									CppAsString2(CATALOG_VERSION_NO)
+
+NODENAME 来自节点postgresql.conf中pgxc_node_name对应的字符串
+
+示例：PG_9.4_201306121_coordinator2   
+
+1. postgres-xc
+
+版本 
+[wln@localhost1 spc1]$ psql -V
+psql (Postgres-XC) 
+(based on PostgreSQL) 9.4beta1
+
+(1). create tablespace 没问题；
+(2). pg_basebackup 无法从datanode master 复制表空间路径下的数据到备机节点 （pg_basebackup没给出复制表空间的参数选项）
+, 也就是无备机节点对应的表空间文件夹； 不过主备建立后，若在coordinator 创建table 放在该表空间下，备机上会生成该节点对应的表空间文件夹及该新建表的数据文件。
+
+
+
+2. postgres-xl
+
+版本
+[wln@localhost1 dn1_1]$ psql -V
+psql (Postgres-XL) 10r1
+(based on PostgreSQL) 10.5 (Postgres-XL 10r1)
+
+pg_basebackup提供参数  -T, --tablespace-mapping=OLDDIR=NEWDIR ， 用来将datanode master 表空间数据复制到指定的文件夹下NEWDIR，
+不方便的是备机表空间对应的名称仍是以主机名字作为文件夹名称结尾而非备机节点名称作为结尾。
+
+
+3. antdb
+pg_basebackup 提供-k nodename 参数(用-k 是由于 -n -N 都被使用了)，这样当使用pg_basebackup 时 指定-k 会将datanode master所有用户创建的表空间文件夹 复制到备机所在的机器上并且路径同master的表空间路径一样只是修改了表空间文件夹名以备机的pgxc_node_name作为结尾。
+
+在failover datanode 后将old datanode master 以备机形式加入集群，通过rewind 操作，这个对于表空间的使用是没问题的。
+
+4. 表空间使用存在的不便：
+1. 同pgxc, pgxl 一样，若create tablespace spc1 location path1 需要path1为空且存在才能创建成功。
+   :: 若path1 不存在，是否可以让数据库去创建？应该能够去做。
+  
+2. clean 节点时用不用删除该节点的用户自定义表空间文件夹？
+需要注意：
+   (1) 若主备节点或者其它备机的 pgxc_node_name同名且在一台机器上，不能去删除 path_x 的数据 。
+   (2) 若 path_x 路径下的内容 用户放进了其它数据，感觉也不应该删除 （不容易判断）。
+   (3) 用户在使用数据库集群时若通常不会创建很多表空间，是否可以在clean node时 不去清理表空间数据而让用户自己清理？我们这边可以提供要清理该节点
+   的表空间路径信息？
+   
+   

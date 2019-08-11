@@ -1,0 +1,416 @@
+
+1. 测试服务器配置说明
+服务器：京东云
+配置：1核 2G内存 40G硬盘
+
+[wln@host122 wln]$ cat /etc/redhat-release 
+CentOS Linux release 7.4.1708 (Core) 
+[wln@host122 wln]$ uname -a
+Linux host122 3.10.0-693.17.1.el7.x86_64 #1 SMP Thu Jan 25 20:13:58 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+[root@host122 ~]# fdisk -l
+Disk /dev/vda: 42.9 GB, 42949672960 bytes, 83886080 sectors
+Units = sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk label type: dos
+Disk identifier: 0x000a5a8a
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *        2048    83886079    41942016   83  Linux
+
+[root@host122 ~]# cat /proc/cpuinfo 
+processor       : 0
+vendor_id       : GenuineIntel
+cpu family      : 6
+model           : 79
+model name      : Intel(R) Xeon(R) CPU E5-2683 v4 @ 2.10GHz
+stepping        : 1
+microcode       : 0x1
+cpu MHz         : 2095.148
+cache size      : 4096 KB
+physical id     : 0
+siblings        : 1
+core id         : 0
+cpu cores       : 1
+apicid          : 0
+initial apicid  : 0
+fpu             : yes
+fpu_exception   : yes
+cpuid level     : 13
+wp              : yes
+flags           : fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon rep_good nopl eagerfpu pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single spec_ctrl ibpb_support fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm rdseed adx smap xsaveopt
+bogomips        : 4190.29
+clflush size    : 64
+cache_alignment : 64
+address sizes   : 46 bits physical, 48 bits virtual
+power management:
+
+2.数据库集群搭建说明
+2.1 数据库集群构成
+1 gtm master + 2 coordinator + 2 datanode master, 无备机
+
+2.2 服务器配置参数
+sysctl -w kernel.sem="500 64000 50 150"
+
+2.3数据库集群配置参数
+set gtm all (work_mem='32MB',  maintenance_work_mem = '64MB', shared_buffers = '156MB', max_connections = 300, max_prepared_transactions = 320, lock_timeout=60000);
+set coordinator all (work_mem='32MB',  maintenance_work_mem = '64MB', shared_buffers = '156MB', max_connections = 300, max_prepared_transactions = 320, lock_timeout=60000);
+set datanode  all (work_mem='32MB',  maintenance_work_mem = '64MB', shared_buffers = '156MB', max_connections = 300, max_prepared_transactions = 320, lock_timeout=60000);
+
+3.测试数据
+以下用antdb 2.2 及 antdb3.1 及 antdb3.2 数据库版本进行测试
+
+创建测试数据库
+ createdb pgbench
+初始化测试数据库，会创建4张表，默认插入了一些数据
+pgbench -i pgbench
+-- 插入5000万条记录
+-- pgbench -i -s 500 pgbench
+
+登录数据库，执行analyze
+
+postgres=# \dt+
+                        List of relations
+ Schema |       Name       | Type  | Owner |  Size  | Description 
+--------+------------------+-------+-------+--------+-------------
+ public | pgbench_accounts | table | wln   | 18 MB  | 
+ public | pgbench_branches | table | wln   | 88 kB  | 
+ public | pgbench_history  | table | wln   | 736 kB | 
+ public | pgbench_tellers  | table | wln   | 208 kB | 
+(4 rows)
+
+postgres=# select count(*) from pgbench_accounts;
+ count  
+--------
+ 100000
+(1 row)
+
+postgres=# select count(*) from pgbench_branches;
+ count 
+-------
+     1
+(1 row)
+
+postgres=# select count(*) from pgbench_history;
+ count 
+-------
+  4000
+(1 row)
+
+postgres=# select count(*) from pgbench_tellers;
+ count 
+-------
+    10
+(1 row)
+
+postgres=# select relname , relpages, reltuples  from pg_class  where relname like '%pgbench%';
+        relname        | relpages | reltuples 
+-----------------------+----------+-----------
+ pgbench_history       |      530 |     82107
+ pgbench_tellers       |        6 |        10
+ pgbench_branches      |        4 |         1
+ pgbench_accounts      |     1724 |    100000
+ pgbench_branches_pkey |        2 |         1
+ pgbench_tellers_pkey  |        2 |        10
+ pgbench_accounts_pkey |      276 |    100000
+(7 rows)
+
+-c clients 模拟的客户数，也就是并发数据库会话数目。缺省是 1。
+-t transactions 每个客户端跑的事务数目。缺省是 10。
+
+3.1 antdb2.2 hot_expand
+测试1
+[wln@host122 wln]$ pgbench -c 20 -t 200 postgres
+starting vacuum...end.
+transaction type: TPC-B (sort of)
+scaling factor: 1
+query mode: simple
+number of clients: 20
+number of threads: 1
+number of transactions per client: 200
+number of transactions actually processed: 4000/4000
+tps = 64.652605 (including connections establishing)
+tps = 64.763011 (excluding connections establishing)
+
+测试2
+[wln@host122 wln]$ pgbench -c 40 -t 200 postgres
+starting vacuum...end.
+transaction type: TPC-B (sort of)
+scaling factor: 1
+query mode: simple
+number of clients: 40
+number of threads: 1
+number of transactions per client: 200
+number of transactions actually processed: 8000/8000
+tps = 61.000454 (including connections establishing)
+tps = 61.094072 (excluding connections establishing)
+
+测试3
+[wln@host122 wln]$ pgbench -r -c 16 -j 16 -n -T 180 postgres 
+
+transaction type: TPC-B (sort of)
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 12064
+tps = 66.923070 (including connections establishing)
+tps = 66.941905 (excluding connections establishing)
+statement latencies in milliseconds:
+        0.004678        \set nbranches 1 * :scale
+        0.001373        \set ntellers 10 * :scale
+        0.001139        \set naccounts 100000 * :scale
+        0.001479        \setrandom aid 1 :naccounts
+        0.000814        \setrandom bid 1 :nbranches
+        0.000979        \setrandom tid 1 :ntellers
+        0.001245        \setrandom delta -5000 5000
+        0.294525        BEGIN;
+        6.094258        UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+        3.195909        SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+        112.269593      UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+        96.722847       UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+        1.629523        INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+        18.606630       END;
+
+测试4
+[wln@host122 ~]$ pgbench -r -c 16 -j 16 -n -T 180 postgres 
+transaction type: TPC-B (sort of)
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 11949
+tps = 66.286992 (including connections establishing)
+tps = 66.309552 (excluding connections establishing)
+statement latencies in milliseconds:
+        0.004649        \set nbranches 1 * :scale
+        0.001425        \set ntellers 10 * :scale
+        0.001208        \set naccounts 100000 * :scale
+        0.001494        \setrandom aid 1 :naccounts
+        0.000841        \setrandom bid 1 :nbranches
+        0.001010        \setrandom tid 1 :ntellers
+        0.001218        \setrandom delta -5000 5000
+        0.269724        BEGIN;
+        6.237897        UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+        3.284523        SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+        112.958394      UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+        97.898169       UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+        1.660014        INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+        18.789878       END;
+
+3.2 pg10.3版本
+参数设置
+log_destination = 'csvlog'
+logging_collector = on
+work_mem='32MB'
+maintenance_work_mem = '64MB'
+shared_buffers = '156MB'
+max_connections = 300
+max_prepared_transactions = 320
+lock_timeout=60000
+
+测试结果
+[wln@host122 adbdata]$ time  pgbench -r -c 16 -j 16 -n -T 180 postgres 
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 82107
+latency average = 35.088 ms
+tps = 455.993310 (including connections establishing)
+tps = 456.105202 (excluding connections establishing)
+script statistics:
+ - statement latencies in milliseconds:
+         0.003  \set aid random(1, 100000 * :scale)
+         0.001  \set bid random(1, 1 * :scale)
+         0.001  \set tid random(1, 10 * :scale)
+         0.001  \set delta random(-5000, 5000)
+         1.548  BEGIN;
+         1.579  UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         5.068  SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+        12.808  UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+        12.235  UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.368  INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         1.463  END;
+
+real    3m0.080s
+user    0m7.428s
+sys     0m7.927s
+
+
+3.3 antdb 3.2
+
+测试1
+enable_cluster_plan = on
+
+[wln@host122 ~]$ pgbench -r -c 16 -j 16 -n -T 180 postgres
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 12191
+latency average = 236.243 ms
+tps = 67.726893 (including connections establishing)
+tps = 67.744621 (excluding connections establishing)
+script statistics:
+ - statement latencies in milliseconds:
+         0.003  \set aid random(1, 100000 * :scale)
+         0.001  \set bid random(1, 1 * :scale)
+         0.001  \set tid random(1, 10 * :scale)
+         0.001  \set delta random(-5000, 5000)
+         0.312  BEGIN;
+         3.103  UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         1.115  SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         1.362  UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         1.159  UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.974  INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         7.560  END;
+
+测试2
+enable_cluster_plan = on
+set coordinator all (force_parallel_mode=on, max_parallel_workers_per_gather=8);
+set datanode  all (force_parallel_mode=on, max_parallel_workers_per_gather=8);
+set gtm  all (force_parallel_mode=on, max_parallel_workers_per_gather=8);
+：：开了并行模式，更慢了
+
+[wln@host122 ~]$ pgbench -r -c 16 -j 16 -n -T 180 postgres 
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 7338
+latency average = 392.484 ms
+tps = 40.765945 (including connections establishing)
+tps = 40.779337 (excluding connections establishing)
+script statistics:
+ - statement latencies in milliseconds:
+         0.003  \set aid random(1, 100000 * :scale)
+         0.001  \set bid random(1, 1 * :scale)
+         0.001  \set tid random(1, 10 * :scale)
+         0.001  \set delta random(-5000, 5000)
+         0.388  BEGIN;
+         3.201  UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+        11.591  SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         1.635  UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         1.199  UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.963  INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         7.639  END;
+
+测试3
+set gtm all (force_parallel_mode=off, max_parallel_workers_per_gather=0);
+set coordinator all (force_parallel_mode=off, max_parallel_workers_per_gather=0, enable_cluster_plan=off);
+set datanode  all (force_parallel_mode=off, max_parallel_workers_per_gather=0, enable_cluster_plan=off);
+
+[wln@host122 ~]$ pgbench -r -c 16 -j 16 -n -T 180 postgres 
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 12249
+latency average = 235.132 ms
+tps = 68.046806 (including connections establishing)
+tps = 68.063882 (excluding connections establishing)
+script statistics:
+ - statement latencies in milliseconds:
+         0.003  \set aid random(1, 100000 * :scale)
+         0.001  \set bid random(1, 1 * :scale)
+         0.001  \set tid random(1, 10 * :scale)
+         0.001  \set delta random(-5000, 5000)
+         0.352  BEGIN;
+         3.062  UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         1.105  SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         1.408  UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         1.121  UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.955  INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         7.537  END;
+
+测试4 
+更改集群为 1 gtm master + 1 coordinator + 1 datanode master
+[wln@host122 ~]$ pgbench -r -c 16 -j 16 -n -T 180 postgres 
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 13659
+latency average = 210.851 ms
+tps = 75.882846 (including connections establishing)
+tps = 75.901517 (excluding connections establishing)
+script statistics:
+ - statement latencies in milliseconds:
+         0.003  \set aid random(1, 100000 * :scale)
+         0.001  \set bid random(1, 1 * :scale)
+         0.001  \set tid random(1, 10 * :scale)
+         0.001  \set delta random(-5000, 5000)
+         0.283  BEGIN;
+         2.930  UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         1.077  SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         1.075  UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         1.056  UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.937  INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         6.482  END;
+测试5
+更改集群为 1 gtm master + 1 coordinator + 1 datanode master
+将集群锁禁掉
+[wln@host122 antdb]$ git diff
+diff --git a/src/backend/tcop/postgres.c b/src/backend/tcop/postgres.c
+index a6bdd60..0dbcb8d 100644
+--- a/src/backend/tcop/postgres.c
++++ b/src/backend/tcop/postgres.c
+@@ -4814,7 +4814,8 @@ PostgresMain(int argc, char *argv[],
+                 * If the session has invoked a PAUSE CLUSTER earlier, then this lock
+                 * will be held already in exclusive mode. No need to lock in that case
+                 */
+-               if (IsUnderPostmaster && IS_PGXC_COORDINATOR && !cluster_ex_lock_held && !cluster_lock_held)
++               if (0)
++               //if (IsUnderPostmaster && IS_PGXC_COORDINATOR && !cluster_ex_lock_held && !cluster_lock_held)
+                {
+                        bool exclusive = false;
+                        AcquireClusterLock(exclusive);
+
+[wln@host122 ~]$ pgbench -r -c 16 -j 16 -n -T 180 postgres 
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 16
+number of threads: 16
+duration: 180 s
+number of transactions actually processed: 13797
+latency average = 208.748 ms
+tps = 76.647425 (including connections establishing)
+tps = 76.667126 (excluding connections establishing)
+script statistics:
+ - statement latencies in milliseconds:
+         0.003  \set aid random(1, 100000 * :scale)
+         0.001  \set bid random(1, 1 * :scale)
+         0.001  \set tid random(1, 10 * :scale)
+         0.001  \set delta random(-5000, 5000)
+         0.288  BEGIN;
+         2.920  UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         1.079  SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         1.074  UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         1.054  UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.945  INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         6.347  END;
+上面显示集群锁对tps影响较小，可忽略。
+
+结论
+测试命令pgbench -r -c 16 -j 16 -n -T 180 postgres    
+集群 1 gtm + 2 coordinator + 2 datanode master    
+    
+condition pg10.3 antdb2.2hot_expand antdb3.2无并行 antdb3.2有并行
+number of transactions actually processed 82107 12064 12191 7338
+latency average 35 没显示 236 392
+tps 455 66 67 40
+
+
