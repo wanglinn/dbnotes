@@ -1,0 +1,93 @@
+   0  $accept : line_list $end
+
+   1  line_list : line
+   2            | line_list line
+
+   3  line : exp CR
+
+   4  exp : factor
+   5      | factor PLUS factor
+
+   6  factor : INTEGER
+
+state 0
+	$accept : . line_list $end  (0)
+
+	INTEGER  shift 1
+	.  error
+
+	line_list  goto 2
+	line  goto 3
+	exp  goto 4
+	factor  goto 5
+
+
+state 1
+	factor : INTEGER .  (6)
+
+	.  reduce 6
+
+
+state 2
+	$accept : line_list . $end  (0)
+	line_list : line_list . line  (2)
+
+	$end  accept
+	INTEGER  shift 1
+	.  error
+
+	line  goto 6
+	exp  goto 4
+	factor  goto 5
+
+
+state 3
+	line_list : line .  (1)
+
+	.  reduce 1
+
+
+state 4
+	line : exp . CR  (3)
+
+	CR  shift 7
+	.  error
+
+
+state 5
+	exp : factor .  (4)
+	exp : factor . PLUS factor  (5)
+
+	PLUS  shift 8
+	CR  reduce 4
+
+
+state 6
+	line_list : line_list line .  (2)
+
+	.  reduce 2
+
+
+state 7
+	line : exp CR .  (3)
+
+	.  reduce 3
+
+
+state 8
+	exp : factor PLUS . factor  (5)
+
+	INTEGER  shift 1
+	.  error
+
+	factor  goto 9
+
+
+state 9
+	exp : factor PLUS factor .  (5)
+
+	.  reduce 5
+
+
+10 terminals, 5 nonterminals
+7 grammar rules, 10 states
