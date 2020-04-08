@@ -1,0 +1,138 @@
+sp_proc_stmt:
+          sp_proc_stmt_statement
+        | sp_proc_stmt_return
+        | sp_proc_stmt_if
+        | case_stmt_specification
+        | sp_labeled_block
+        | sp_unlabeled_block
+        | sp_labeled_control
+        | sp_proc_stmt_unlabeled
+        | sp_proc_stmt_leave
+        | sp_proc_stmt_iterate
+        | sp_proc_stmt_open
+        | sp_proc_stmt_fetch
+        | sp_proc_stmt_close
+        ;
+		
+
+ev_sql_stmt_inner:
+          sp_proc_stmt_statement
+        | sp_proc_stmt_return
+        | sp_proc_stmt_if
+        | case_stmt_specification
+        | sp_labeled_block
+        | sp_unlabeled_block
+        | sp_labeled_control
+        | sp_proc_stmt_unlabeled
+        | sp_proc_stmt_leave
+        | sp_proc_stmt_iterate
+        | sp_proc_stmt_open
+        | sp_proc_stmt_fetch
+        | sp_proc_stmt_close
+        ;
+		
+这两个完全一样，区别在哪？
+
+
+sp_proc_stmts:
+          /* Empty */ {}
+        | sp_proc_stmts  sp_proc_stmt ';'
+        ;
+		
+
+sp_start_parsing() 必须 sp_finish_parsing() 配对使用。
+
+
+sp_head *sp_start_parsing(THD *thd,
+                          enum_sp_type sp_type,
+                          sp_name *sp_name)
+函数作用：
+1. new sp_head
+2. void sp_parser_data::start_parsing_sp_body(THD *thd, sp_head *sp) 函数内
+  m_saved_memroot= thd->mem_root;
+  m_saved_free_list= thd->free_list;
+  thd->mem_root= sp->get_persistent_mem_root();
+3. new sp->m_root_parsing_ctx
+4. 设置了当前sphead 对应的parse content:
+  set_sp_current_parsing_ctx
+5. sp_head::init_sp_name(THD *thd, sp_name *spname) 给sp_head对象中成员赋值：
+	m_db
+	m_name
+	m_qname
+
+
+void sp_finish_parsing(THD *thd)
+函数作用：
+1. void sp_head::set_body_end(THD *thd)
+获取 m_params 对应长度，字符串
+获取 m_body 对应长度，字符串
+获取 m_defstr 对应长度，字符串
+
+2. sp->m_parser_data.finish_parsing_sp_body(thd)
+将sp_start_parsing 函数中保存的值重新赋值过来
+    thd->mem_root= m_saved_memroot;
+    thd->free_list= m_saved_free_list;
+	
+
+对应入参
+Lex->sphead->m_parser_data.set_parameter_start_ptr(@4.cpp.end);
+lex->sphead->m_parser_data.set_parameter_end_ptr(@7.cpp.start);
+用两个char *指针来标识位置，从而计算之间的字符串及长度
+
+对应包体
+lex->sphead->set_body_start(thd, yylloc.cpp.start);
+
+
+函数作用:
+bool sp_head::reset_lex(THD *thd)
+1. 将thd->lex （即oldlex）保存到 m_parser_data.push_lex(oldlex);
+   (这里 sp_parser_data m_parser_data 是sphead 对象的其中一个成员变量)
+2. new 一个 lex , 使用前 lex_start(thd);
+3. 将老的lex对应的sphead 对应新的lex的sphead, 且 sp_pcontext 也使用同一个
+  sublex->sphead= oldlex->sphead;
+  sublex->set_sp_current_parsing_ctx(oldlex->get_sp_current_parsing_ctx());
+：：在使用一个新语句（存储过程的包体可以看作有多个语句组成）前，必须使用
+sp->reset_lex(thd)， 这样每个语句都对应一个lex (不过使用的是同一个sphead， 其实thd->sphead 与 lex->sphead是
+同一个sphead)
+ 
+  
+sp->m_parser_data.set_current_stmt_start_ptr(yylloc.raw.start);
+标识stmt 起始位置
+
+语法报错终止 MYSQL_YYABORT
+
+
+sphead 中用来保存语句指令的成员变量：
+  /// The SP-instructions.
+  Mem_root_array<sp_instr *, true> m_instructions;
+  
+ 
+
+来了一个语句，需要记录保存到sphead对应的指令集的变量 m_instructions
+            if (lex->sql_command != SQLCOM_SET_OPTION)
+            {
+              /* Extract the query statement from the tokenizer. */
+
+              LEX_STRING query=
+                make_string(thd,
+                            sp->m_parser_data.get_current_stmt_start_ptr(),
+                            @2.raw.end);
+
+              if (!query.str)
+                MYSQL_YYABORT;
+
+              /* Add instruction. */
+
+              sp_instr_stmt *i=
+                new (thd->mem_root)
+                  sp_instr_stmt(sp->instructions(), lex, query);
+
+              if (!i || sp->add_instr(thd, i))
+                MYSQL_YYABORT;
+            }
+			
+函数作用：
+sp->restore_lex(thd)
+语句指令保存后这个thd->lex 也就该结束了，调用函数 bool sp_head::restore_lex(THD *thd)
+将原来的lex 再重新赋值过来。
+lex_end(sublex) 函数会将sublex->sphead delete 处理 （因为这个是所有语句都添加到指令集了，不再需要sphead）。
