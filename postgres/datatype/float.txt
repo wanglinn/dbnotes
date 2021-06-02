@@ -1,0 +1,115 @@
+向不同的字段id1, id2 都插入数据9.9， 通过id1 = id2 一定能查询出结果吗？
+答案：不一定，需要看具体类型。
+
+pg数据库：
+drop table t3;
+create table t3(id1 float);
+insert into t3 values(1234567890.123456789012345678901234567890);
+insert into t3 values(123456.111112222233333444445555566666);   
+select * from t3;
+        id1         
+--------------------
+ 1234567890.1234567
+ 123456.11111222224
+(2 rows)
+
+postgres=# \dS+ t3
+                                         Table "public.t3"
+ Column |       Type       | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+------------------+-----------+----------+---------+---------+--------------+-------------
+ id1    | double precision |           |          |         | plain   |              | 
+Access method: heap
+
+
+pg 数据库float类型实际就是c语言中的double类型。
+
+根据输出结果可以看出，最大小数位11位，有效数字17。
+
+有效数字规则，见百度百科:
+https://baike.baidu.com/item/%E6%9C%89%E6%95%88%E6%95%B0%E5%AD%97/406066?fr=aladdin
+
+
+问题1：
+浮点型数字并不能完全准确显示实际数字，有的会是约数的形式，因为浮点型都是2的幂次进行取值的。
+http://www.binaryconvert.com 在线显示浮点数对应的二进制形式及约数。
+
+create table t4(id1 float , id2 numeric(30,15);
+insert into t4 values(9.9, 9.9);
+select * from t4 where id1 = id2;
+
+ id1 |        id2        
+-----+-------------------
+ 9.9 | 9.900000000000000
+(1 row)
+
+postgres=# explain verbose select * from t4 where id1 = id2;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Seq Scan on public.t4  (cost=0.00..29.65 rows=7 width=34)
+   Output: id1, id2
+   Filter: (t4.id1 = (t4.id2)::double precision)
+(3 rows)
+
+
+
+
+
+create table t5(id1 real, id2 numeric(30,15));
+insert into t5 values(9.9, 9.9);
+select * from t5 where id1 = id2;
+
+postgres=# explain verbose select * from t5 where id1 = id2;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Seq Scan on public.t5  (cost=0.00..31.00 rows=7 width=30)
+   Output: id1, id2
+   Filter: (t5.id1 = (t5.id2)::double precision)
+(3 rows)
+
+Time: 1.037 ms
+postgres=# select * from t5;
+ id1 |        id2        
+-----+-------------------
+ 9.9 | 9.900000000000000
+(1 row)
+
+Time: 0.901 ms
+postgres=# \dS+ t5
+                                        Table "public.t5"
+ Column |      Type      | Collation | Nullable | Default | Storage | Stats target | Description 
+--------+----------------+-----------+----------+---------+---------+--------------+-------------
+ id1    | real           |           |          |         | plain   |              | 
+ id2    | numeric(30,15) |           |          |         | main    |              | 
+Access method: heap
+
+
+insert into t5 values(123456.1111122222333334444455555, 23423);
+postgres=# select * from t5;
+    id1    |          id2          
+-----------+-----------------------
+       9.9 |     9.900000000000000
+ 123456.11 | 23423.000000000000000
+(2 rows)
+
+real 类型有效位8位。
+pg数据库数据类型见文件 pg_type_d.h ，format_type.c 
+real 应该对应  FLOAT4OID, 可以通过函数 format_type_extended 看到。
+
+select * from t5 where id1 = id2;  numeric 转换函数 numeric_float8
+
+比较函数 float48eq
+(gdb) p arg1
+$13 = 9.89999962
+(gdb) p arg2
+$14 = 9.9000000000000004
+
+float8_eq 函数
+(gdb) p val1
+$15 = 9.8999996185302734
+(gdb) p val2
+$16 = 9.9000000000000004
+
+所以 select * from t5 where id1 = id2;  查询结果为空。
+
+
+
